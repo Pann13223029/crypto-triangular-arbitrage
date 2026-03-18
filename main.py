@@ -13,12 +13,20 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-def setup_logging(level: str = "INFO") -> None:
-    logging.basicConfig(
-        level=getattr(logging, level.upper(), logging.INFO),
-        format="%(asctime)s │ %(levelname)-7s │ %(name)-20s │ %(message)s",
-        datefmt="%H:%M:%S",
-    )
+def setup_logging(level: str = "INFO", dashboard: bool = False) -> None:
+    if dashboard:
+        # When dashboard is active, suppress log output (dashboard shows everything)
+        logging.basicConfig(
+            level=logging.WARNING,
+            format="%(asctime)s │ %(levelname)-7s │ %(name)-20s │ %(message)s",
+            datefmt="%H:%M:%S",
+        )
+    else:
+        logging.basicConfig(
+            level=getattr(logging, level.upper(), logging.INFO),
+            format="%(asctime)s │ %(levelname)-7s │ %(name)-20s │ %(message)s",
+            datefmt="%H:%M:%S",
+        )
     # Quiet noisy libraries
     logging.getLogger("aiohttp").setLevel(logging.WARNING)
     logging.getLogger("ccxt").setLevel(logging.WARNING)
@@ -33,6 +41,11 @@ def parse_args():
         choices=["simulation", "live"],
         default="simulation",
         help="Trading mode (default: simulation)",
+    )
+    parser.add_argument(
+        "--dashboard",
+        action="store_true",
+        help="Enable real-time CLI dashboard",
     )
     parser.add_argument(
         "--dry-run",
@@ -59,6 +72,7 @@ async def run_simulation(args):
     from core.calculator import ProfitCalculator
     from core.scanner import TriangleScanner
     from core.triangle import TriangleGraph
+    from dashboard.cli_monitor import Dashboard
     from data.db import Database
     from data.price_cache import PriceCache
     from exchange.binance_rest import BinanceREST
@@ -74,7 +88,7 @@ async def run_simulation(args):
     # --- Initialize components ---
 
     logger.info("=== Crypto Triangular Arbitrage ===")
-    logger.info("Mode: %s | Dry-run: %s", args.mode, args.dry_run)
+    logger.info("Mode: %s | Dry-run: %s | Dashboard: %s", args.mode, args.dry_run, args.dashboard)
 
     # 1. Fetch trading pairs from Binance
     rest = BinanceREST()
@@ -119,11 +133,17 @@ async def run_simulation(args):
     await db.connect()
     session_id = await db.start_session(args.mode)
 
-    # 4. WebSocket callbacks
+    # 4. WebSocket callbacks — event-driven scanning
+    ticker_queue: asyncio.Queue = asyncio.Queue()
+
     def on_ticker(ticker):
         price_cache.update_ticker(ticker)
         scanner.tickers[ticker.symbol] = ticker
         sim_exchange.inject_ticker(ticker)
+        try:
+            ticker_queue.put_nowait(ticker)
+        except asyncio.QueueFull:
+            pass  # Drop if backlogged
 
     def on_order_book(book):
         price_cache.update_order_book(book)
@@ -135,7 +155,21 @@ async def run_simulation(args):
         on_order_book=on_order_book,
     )
 
-    # 5. Opportunity processing task
+    # 5. Dashboard (optional)
+    dashboard = None
+    if args.dashboard:
+        dashboard = Dashboard(
+            scanner=scanner,
+            price_cache=price_cache,
+            ws=ws,
+            exchange=sim_exchange,
+            executor=executor,
+            risk_manager=risk_manager,
+            order_manager=order_manager,
+            mode=args.mode,
+        )
+
+    # 6. Opportunity processing task
     opportunity_queue: asyncio.Queue = asyncio.Queue()
 
     async def process_opportunities():
@@ -145,22 +179,27 @@ async def run_simulation(args):
             if opp is None:
                 break
 
+            path = " → ".join(opp.triangle.assets)
+
             # Risk check
             approved, reason = risk_manager.check(opp, ws_healthy=ws.is_healthy)
 
             if not approved:
                 opp.skip_reason = reason
                 await db.log_opportunity(opp)
+                if dashboard:
+                    dashboard.record_opportunity(path, opp.theoretical_profit, False, reason)
                 continue
 
             if args.dry_run:
                 logger.info(
                     "DRY-RUN: Would execute %s (%.4f%%)",
-                    " → ".join(opp.triangle.assets),
-                    opp.theoretical_profit * 100,
+                    path, opp.theoretical_profit * 100,
                 )
                 opp.skip_reason = "dry-run"
                 await db.log_opportunity(opp)
+                if dashboard:
+                    dashboard.record_opportunity(path, opp.theoretical_profit, False, "dry-run")
                 continue
 
             # Execute!
@@ -174,31 +213,29 @@ async def run_simulation(args):
             for i, order in enumerate(result.orders):
                 await db.log_trade(opp_id, i + 1, order)
 
-    # 6. Scanning task — runs on each tick
+            if dashboard:
+                pnl = result.net_pnl if not result.aborted else 0.0
+                dashboard.record_opportunity(path, pnl, not result.aborted,
+                                             result.abort_reason if result.aborted else "")
+
+    # 7. Scanning task — event-driven from ticker queue
     scan_count = 0
 
     async def scan_loop():
         nonlocal scan_count
         while True:
-            await asyncio.sleep(0.1)  # 100ms scan interval
+            ticker = await ticker_queue.get()
+            if ticker is None:
+                break
 
-            if price_cache.is_stale():
-                continue
-
-            # Check all symbols for changes and scan
-            for symbol in list(price_cache.tickers.keys()):
-                ticker = price_cache.get_ticker(symbol)
-                if ticker is None:
-                    continue
-
-                opportunities = scanner.update_ticker(ticker)
-                for opp in opportunities:
-                    await opportunity_queue.put(opp)
+            opportunities = scanner.update_ticker(ticker)
+            for opp in opportunities:
+                await opportunity_queue.put(opp)
 
             scan_count += 1
 
-            # Periodic stats
-            if scan_count % 100 == 0:
+            # Periodic stats (only when dashboard is off)
+            if not args.dashboard and scan_count % 5000 == 0:
                 s = scanner.stats()
                 r = risk_manager.stats()
                 e = executor.stats()
@@ -210,19 +247,22 @@ async def run_simulation(args):
                     e["net_pnl"], r["killed"],
                 )
 
-    # 7. Start everything
+    # 8. Start everything
     logger.info("Starting WebSocket connection...")
 
     # Create tasks
     processor_task = asyncio.create_task(process_opportunities())
     scanner_task = asyncio.create_task(scan_loop())
+    dashboard_task = None
+    if dashboard:
+        dashboard_task = asyncio.create_task(dashboard.run())
 
     # Duration limit
     async def duration_watchdog():
         if args.duration > 0:
             await asyncio.sleep(args.duration)
             logger.info("Duration limit reached (%ds)", args.duration)
-            raise KeyboardInterrupt
+            await ws.stop()
 
     watchdog_task = asyncio.create_task(duration_watchdog()) if args.duration > 0 else None
 
@@ -234,7 +274,10 @@ async def run_simulation(args):
         logger.info("Shutting down...")
 
         # Stop tasks
-        scanner_task.cancel()
+        await ticker_queue.put(None)  # Signal scanner to stop
+        await scanner_task
+        if dashboard_task:
+            dashboard_task.cancel()
         await opportunity_queue.put(None)  # Signal processor to stop
         await processor_task
         if watchdog_task:
@@ -265,7 +308,7 @@ async def run_simulation(args):
 
 async def main():
     args = parse_args()
-    setup_logging(args.log_level)
+    setup_logging(args.log_level, dashboard=args.dashboard)
 
     if args.mode == "live":
         key = os.getenv("BINANCE_API_KEY", "")
