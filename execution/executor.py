@@ -110,6 +110,8 @@ class Executor:
         if balance_usd <= 0:
             result.aborted = True
             result.abort_reason = f"Zero {start_asset} balance"
+            self.total_aborts += 1
+            logger.warning("ABORTED: %s", result.abort_reason)
             self.risk_manager.on_trade_end()
             return result
 

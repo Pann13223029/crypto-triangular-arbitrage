@@ -11,7 +11,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 class TradingConfig:
     """Risk and trading parameters."""
 
-    min_profit_threshold: float = 0.001  # 0.1% minimum net profit
+    min_profit_threshold: float = 0.0001  # 0.01% minimum net profit
     max_position_size_usd: float = 500.0  # Max USD per triangle
     daily_loss_limit_usd: float = 50.0  # Kill switch threshold
     max_open_triangles: int = 1  # One at a time (v1)
@@ -56,9 +56,9 @@ class SimulationConfig:
     initial_balances: dict[str, float] = field(
         default_factory=lambda: {
             "USDT": 10000.0,
-            "BTC": 0.0,
-            "ETH": 0.0,
-            "BNB": 10.0,  # For fee payment
+            "BTC": 0.15,     # ~$10K worth
+            "ETH": 4.0,      # ~$10K worth
+            "BNB": 15.0,     # ~$10K worth + fee payment
         }
     )
     slippage_model: str = "fixed"  # "fixed", "random", "depth"

@@ -16,6 +16,9 @@ class TriangleScanner:
 
     On each price tick, only recalculates triangles affected by the
     updated symbol — not all triangles.
+
+    Deduplicates: won't emit the same triangle again within
+    the cooldown window (default 5s).
     """
 
     def __init__(
@@ -23,18 +26,24 @@ class TriangleScanner:
         graph: TriangleGraph,
         calculator: ProfitCalculator,
         min_profit: float = 0.001,
+        dedup_cooldown_ms: int = 5000,
     ):
         self.graph = graph
         self.calculator = calculator
         self.min_profit = min_profit
+        self.dedup_cooldown_ms = dedup_cooldown_ms
 
         # Current price state
         self.tickers: dict[str, Ticker] = {}
+
+        # Dedup: triangle_id → last emission timestamp (ms)
+        self._last_emitted: dict[int, int] = {}
 
         # Stats
         self.total_ticks: int = 0
         self.total_scans: int = 0
         self.total_opportunities: int = 0
+        self.total_deduped: int = 0
 
     def update_ticker(self, ticker: Ticker) -> list[Opportunity]:
         """
@@ -63,18 +72,30 @@ class TriangleScanner:
             min_profit=self.min_profit,
         )
 
-        self.total_opportunities += len(opportunities)
+        # Deduplicate — don't re-emit the same triangle within cooldown
+        now_ms = time_ns() // 1_000_000
+        unique: list[Opportunity] = []
+        for opp in opportunities:
+            tri_id = opp.triangle.id
+            last = self._last_emitted.get(tri_id, 0)
+            if (now_ms - last) >= self.dedup_cooldown_ms:
+                self._last_emitted[tri_id] = now_ms
+                unique.append(opp)
+            else:
+                self.total_deduped += 1
 
-        if opportunities:
-            best = opportunities[0]
+        self.total_opportunities += len(unique)
+
+        if unique:
+            best = unique[0]
             logger.info(
-                "Found %d opportunities (best: %.4f%% on %s)",
-                len(opportunities),
-                best.theoretical_profit * 100,
+                "Opportunity: %s %s (%.4f%%)",
+                best.direction.value,
                 " → ".join(best.triangle.assets),
+                best.theoretical_profit * 100,
             )
 
-        return opportunities
+        return unique
 
     def bulk_update(self, tickers: list[Ticker]) -> list[Opportunity]:
         """
@@ -116,6 +137,7 @@ class TriangleScanner:
             "total_ticks": self.total_ticks,
             "total_triangle_scans": self.total_scans,
             "total_opportunities": self.total_opportunities,
+            "total_deduped": self.total_deduped,
             "tracked_symbols": len(self.tickers),
             "hit_rate": (
                 f"{self.total_opportunities / max(self.total_scans, 1) * 100:.4f}%"
