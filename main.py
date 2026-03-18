@@ -6,6 +6,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+from time import time_ns
 
 from dotenv import load_dotenv
 
@@ -356,6 +357,7 @@ async def run_cross_exchange_simulation(args):
     from cross_exchange.risk_manager import CrossExchangeRiskManager
     from cross_exchange.balance_tracker import BalanceTracker
     from cross_exchange.models import CrossExchangeOpportunity
+    from monitoring.metrics import PipelineMetrics, TradeMetric
     from rebalancing.manager import RebalanceManager
     from data.db import Database
     from data.price_cache import PriceCache
@@ -380,7 +382,11 @@ async def run_cross_exchange_simulation(args):
     multi_sim = MultiExchangeSimulator(config.multi_sim)
     multi_sim.load_pairs(pairs)
 
-    # 3. Cross-exchange scanner
+    # 3. Balance tracker (needed by scanner for pre-flight checks)
+    balance_tracker = BalanceTracker(multi_sim.exchanges)
+    await balance_tracker.refresh_all()
+
+    # 4. Cross-exchange scanner (with pre-flight balance filter)
     fee_schedules = multi_sim.get_fee_schedules()
     cx_scanner = CrossExchangeScanner(
         symbols=config.cross_exchange.symbols,
@@ -388,9 +394,11 @@ async def run_cross_exchange_simulation(args):
         min_net_spread=config.cross_exchange.min_net_spread,
         staleness_ms=config.cross_exchange.staleness_threshold_ms,
         dedup_cooldown_ms=config.cross_exchange.dedup_cooldown_ms,
+        balance_tracker=balance_tracker,
+        min_trade_usd=10.0,
     )
 
-    # 4. Executor + Risk Manager
+    # 5. Executor + Risk Manager
     cx_risk = CrossExchangeRiskManager(config.trading, config.cross_exchange)
     cx_executor = CrossExchangeExecutor(
         exchanges=multi_sim.exchanges,
@@ -398,12 +406,12 @@ async def run_cross_exchange_simulation(args):
         cx_config=config.cross_exchange,
     )
 
-    # 5. Balance tracker + Rebalancer
-    balance_tracker = BalanceTracker(multi_sim.exchanges)
-    await balance_tracker.refresh_all()
-
+    # 6. Rebalancer
     rebalancer = RebalanceManager(balance_tracker, config.rebalance)
     rebalancer.set_targets(config.multi_sim.exchange_ids)
+
+    # 7. Pipeline metrics
+    metrics = PipelineMetrics()
 
     # 6. Database
     db = Database(config.database)
@@ -431,7 +439,11 @@ async def run_cross_exchange_simulation(args):
                 except asyncio.QueueFull:
                     pass
 
-    ws = BinanceWebSocket(config=config.websocket, on_ticker=on_ticker)
+    ws = BinanceWebSocket(
+        config=config.websocket,
+        on_ticker=on_ticker,
+        use_book_ticker=True,  # Faster: best bid/ask only, updates on every book change
+    )
 
     # 8. Opportunity processor — executes trades
     trade_results = []
@@ -442,21 +454,27 @@ async def run_cross_exchange_simulation(args):
             if opp is None:
                 break
 
+            tm = TradeMetric(
+                opportunity_detected_ms=opp.timestamp_ms,
+                symbol=opp.symbol,
+            )
+
             # Risk check
             approved, reason = cx_risk.check(opp)
+            tm.risk_check_ms = time_ns() // 1_000_000
+
             if not approved:
                 opp.skip_reason = reason
                 await db.log_cross_opportunity(opp)
+                tm.aborted = True
+                metrics.record(tm)
                 continue
 
             if args.dry_run:
-                logger.info(
-                    "DRY-RUN: %s BUY %s SELL %s (net: %.4f%%)",
-                    opp.symbol, opp.buy_exchange, opp.sell_exchange,
-                    opp.net_spread * 100,
-                )
                 opp.skip_reason = "dry-run"
                 await db.log_cross_opportunity(opp)
+                tm.aborted = True
+                metrics.record(tm)
                 continue
 
             # Execute
@@ -464,8 +482,13 @@ async def run_cross_exchange_simulation(args):
             opp.executed = True
             opp_id = await db.log_cross_opportunity(opp)
 
+            tm.execution_start_ms = time_ns() // 1_000_000
             result = await cx_executor.execute(opp)
+            tm.execution_end_ms = time_ns() // 1_000_000
+            tm.net_pnl = result.net_pnl
+
             trade_results.append(result)
+            metrics.record(tm)
 
             # Log trades
             if result.buy_order:
@@ -514,19 +537,27 @@ async def run_cross_exchange_simulation(args):
                 rb["total_transfers"], r["killed"],
             )
 
-            # Check rebalancing every N intervals (config.rebalance.check_interval_sec)
+            # Check rebalancing every N intervals
             check_every = max(1, int(config.rebalance.check_interval_sec / 10))
             if config.rebalance.enabled and rebalance_counter % check_every == 0:
                 await balance_tracker.refresh_all()
+
+                # Feed deviation data to risk manager for imbalance filtering
+                dev_report = rebalancer.get_deviation_report()
+                dev_fracs = {}
+                for ex_id, info in dev_report.items():
+                    target = info["target_usdt"]
+                    current = info["current_usdt"]
+                    dev_fracs[ex_id] = (current - target) / target if target > 0 else 0
+                cx_risk.update_deviations(dev_fracs)
+
                 decision = rebalancer.check_rebalance_needed()
                 if decision is not None:
                     completed = await rebalancer.execute_rebalance(decision)
                     for transfer in completed:
                         await db.log_transfer(transfer)
 
-                    # Log deviation report
-                    report = rebalancer.get_deviation_report()
-                    for ex_id, info in report.items():
+                    for ex_id, info in dev_report.items():
                         logger.info(
                             "  Balance: %s USDT $%.0f (target $%.0f, dev %s)",
                             ex_id, info["current_usdt"],
@@ -574,6 +605,7 @@ async def run_cross_exchange_simulation(args):
         print(f"    Total updates:      {s['total_updates']:>10,}")
         print(f"    Opportunities:      {s['total_opportunities']:>10}")
         print(f"    Deduped:            {s['total_deduped']:>10}")
+        print(f"    Preflight rejected: {s.get('preflight_rejected', 0):>10}")
 
         print(f"\n  EXECUTION")
         print(f"    Total executions:   {e['total_executions']:>10}")
@@ -601,6 +633,7 @@ async def run_cross_exchange_simulation(args):
         print(f"    Emergency hedges:   {r['emergency_hedges']:>10}")
         print(f"    Kill switch:        {'ACTIVE — '+r['kill_reason'] if r['killed'] else 'OFF':>10}")
         print(f"    Approved/Rejected:  {r['approved']}/{r['rejected']}")
+        print(f"    Imbalance blocked:  {r.get('imbalance_rejected', 0):>10}")
 
         print(f"\n  BALANCES PER EXCHANGE")
         for ex_id in sorted(dev.keys()):
@@ -612,6 +645,26 @@ async def run_cross_exchange_simulation(args):
                 f"    {ex_id:<14}  USDT: ${usdt:>10.2f}  "
                 f"(target: ${info['target_usdt']:>.0f}, dev: {info['deviation']}){flag}"
             )
+
+        # Pipeline metrics
+        m = metrics.stats()
+        print(f"\n  PIPELINE TIMING")
+        print(f"    Avg pipeline:       {m['avg_pipeline_ms']:>8}ms")
+        print(f"    Avg execution:      {m['avg_execution_ms']:>8}ms")
+        print(f"    Avg opp age:        {m['avg_opportunity_age_ms']:>8}ms")
+        print(f"    Max opp age:        {m['max_opportunity_age_ms']:>8}ms")
+        print(f"    Abort rate:         {m['abort_rate']:>10}")
+
+        # Per-symbol P&L
+        sym_report = metrics.symbol_report()
+        if sym_report:
+            print(f"\n  P&L BY SYMBOL")
+            for sr in sym_report[:10]:
+                pnl_sign = "+" if sr["pnl"] >= 0 else ""
+                print(
+                    f"    {sr['symbol']:<10} {pnl_sign}${sr['pnl']:>8.4f}  "
+                    f"({sr['trades']} trades, avg ${sr['avg_pnl']:.4f})"
+                )
 
         print(f"\n  WEBSOCKET")
         print(f"    Messages received:  {ws.stats()['total_messages']:>10,}")

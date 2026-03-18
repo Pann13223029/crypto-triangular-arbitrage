@@ -107,7 +107,7 @@ class CrossExchangeConfig:
     max_position_size_usd: float = 500.0
     staleness_threshold_ms: int = 1000  # 1 second
     max_concurrent_arbs: int = 3
-    dedup_cooldown_ms: int = 3000  # 3 seconds
+    dedup_cooldown_ms: int = 5000  # 5 seconds (bookTicker fires much more frequently)
     symbols: list[str] = field(
         default_factory=lambda: [
             "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",

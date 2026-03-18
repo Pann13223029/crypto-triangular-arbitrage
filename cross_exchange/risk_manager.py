@@ -37,9 +37,14 @@ class CrossExchangeRiskManager:
         # Exchange health: exchange_id -> healthy
         self.exchange_healthy: dict[str, bool] = {}
 
+        # Imbalance tracking: exchange_id -> USDT deviation fraction
+        self.exchange_deviation: dict[str, float] = {}
+        self.hard_imbalance_threshold: float = 0.30  # Block worsening trades
+
         # Stats
         self.total_approved: int = 0
         self.total_rejected: int = 0
+        self.total_imbalance_rejected: int = 0
 
         # Limits
         self.emergency_hedge_limit: int = 3  # Per session
@@ -91,6 +96,20 @@ class CrossExchangeRiskManager:
             self.total_rejected += 1
             return False, f"Below min spread ({opp.net_spread:.4%})"
 
+        # Imbalance-aware filtering: block trades that worsen severe imbalance
+        buy_dev = self.exchange_deviation.get(opp.buy_exchange, 0.0)
+        sell_dev = self.exchange_deviation.get(opp.sell_exchange, 0.0)
+        # Buying spends USDT on buy_exchange — bad if already in deficit
+        if buy_dev < -self.hard_imbalance_threshold:
+            self.total_rejected += 1
+            self.total_imbalance_rejected += 1
+            return False, f"Would worsen imbalance on {opp.buy_exchange} ({buy_dev:+.1%})"
+        # Selling accumulates USDT on sell_exchange — bad if already excess
+        if sell_dev > self.hard_imbalance_threshold:
+            self.total_rejected += 1
+            self.total_imbalance_rejected += 1
+            return False, f"Would worsen imbalance on {opp.sell_exchange} ({sell_dev:+.1%})"
+
         # Exchange health
         for ex_id in [opp.buy_exchange, opp.sell_exchange]:
             if not self.exchange_healthy.get(ex_id, True):
@@ -126,6 +145,10 @@ class CrossExchangeRiskManager:
     def on_arb_end(self) -> None:
         self.active_arbs = max(0, self.active_arbs - 1)
 
+    def update_deviations(self, deviations: dict[str, float]) -> None:
+        """Update exchange balance deviation data from rebalancer."""
+        self.exchange_deviation = deviations
+
     def set_exchange_health(self, exchange_id: str, healthy: bool) -> None:
         self.exchange_healthy[exchange_id] = healthy
         if not healthy:
@@ -155,4 +178,5 @@ class CrossExchangeRiskManager:
             "kill_reason": self.kill_reason,
             "approved": self.total_approved,
             "rejected": self.total_rejected,
+            "imbalance_rejected": self.total_imbalance_rejected,
         }

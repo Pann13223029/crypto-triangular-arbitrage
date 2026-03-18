@@ -1,10 +1,16 @@
 """Binance WebSocket client for real-time price and order book feeds."""
 
 import asyncio
-import json
 import logging
 from time import time_ns
 from typing import Callable
+
+try:
+    import orjson
+    _loads = orjson.loads
+except ImportError:
+    import json
+    _loads = json.loads
 
 import aiohttp
 
@@ -27,10 +33,12 @@ class BinanceWebSocket:
         config: WebSocketConfig | None = None,
         on_ticker: Callable[[Ticker], None] | None = None,
         on_order_book: Callable[[OrderBook], None] | None = None,
+        use_book_ticker: bool = False,
     ):
         self.config = config or WebSocketConfig()
         self.on_ticker = on_ticker
         self.on_order_book = on_order_book
+        self.use_book_ticker = use_book_ticker
 
         self._session: aiohttp.ClientSession | None = None
         self._ws: aiohttp.ClientWebSocketResponse | None = None
@@ -57,8 +65,11 @@ class BinanceWebSocket:
         streams = []
         for symbol in symbols:
             s = symbol.lower()
-            streams.append(f"{s}@ticker")
-            streams.append(f"{s}@depth{self.config.order_book_depth}@100ms")
+            if self.use_book_ticker:
+                streams.append(f"{s}@bookTicker")
+            else:
+                streams.append(f"{s}@ticker")
+                streams.append(f"{s}@depth{self.config.order_book_depth}@100ms")
 
         url = f"{self.config.base_url}/{'/'.join(streams[:1])}"
         # For many streams, use the combined stream endpoint
@@ -149,9 +160,9 @@ class BinanceWebSocket:
     def _process_message(self, raw: str) -> None:
         """Parse and dispatch a WebSocket message."""
         try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
-            logger.warning("Invalid JSON: %s", raw[:100])
+            data = _loads(raw)
+        except (ValueError, TypeError):
+            logger.warning("Invalid JSON: %s", str(raw)[:100])
             return
 
         # Combined stream format: {"stream": "...", "data": {...}}
@@ -162,13 +173,31 @@ class BinanceWebSocket:
             stream = data.get("e", "")
             payload = data
 
-        if "@ticker" in str(stream) or payload.get("e") == "24hrTicker":
+        if "@bookTicker" in str(stream) or payload.get("e") == "bookTicker":
+            self._handle_book_ticker(payload)
+        elif "@ticker" in str(stream) or payload.get("e") == "24hrTicker":
             self._handle_ticker(payload)
         elif "@depth" in str(stream) or payload.get("e") == "depthUpdate":
             self._handle_depth(payload)
 
+    def _handle_book_ticker(self, data: dict) -> None:
+        """Parse bookTicker update (best bid/ask only — fastest stream)."""
+        if self.on_ticker is None:
+            return
+
+        try:
+            ticker = Ticker(
+                symbol=data["s"],
+                bid=float(data["b"]),
+                ask=float(data["a"]),
+                timestamp_ms=int(data.get("E", time_ns() // 1_000_000)),
+            )
+            self.on_ticker(ticker)
+        except (KeyError, ValueError) as e:
+            logger.debug("Failed to parse bookTicker: %s", e)
+
     def _handle_ticker(self, data: dict) -> None:
-        """Parse 24hr ticker update."""
+        """Parse 24hr ticker update (fallback for non-bookTicker streams)."""
         if self.on_ticker is None:
             return
 

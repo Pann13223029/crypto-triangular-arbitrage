@@ -87,8 +87,20 @@ class CrossExchangeExecutor:
         buy_quote_usd = buy_quote_balance  # Already USDT
         sell_base_usd = await self._get_usd_value(sell_exchange, base_asset, sell_base_balance)
 
+        # Spread-based position scaling
         max_usd = self.cx_config.max_position_size_usd
-        available_usd = min(buy_quote_usd, sell_base_usd, max_usd)
+        spread = opportunity.net_spread
+        if spread < 0.001:
+            scale = 0.25
+        elif spread < 0.002:
+            scale = 0.50
+        elif spread < 0.005:
+            scale = 0.75
+        else:
+            scale = 1.0
+
+        scaled_max = max_usd * scale
+        available_usd = min(buy_quote_usd, sell_base_usd, scaled_max)
 
         if available_usd < 1.0:  # Minimum $1
             result.status = CrossTradeStatus.FAILED
