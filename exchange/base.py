@@ -1,12 +1,25 @@
-"""Abstract exchange interface — shared by SimulatedExchange and LiveExchange."""
+"""Abstract exchange interface — shared by all exchange implementations."""
 
 from abc import ABC, abstractmethod
 
+from config.settings import FeeSchedule
 from core.models import Order, OrderBook, OrderSide, Ticker, TradingPair
 
 
 class ExchangeBase(ABC):
     """Base class for all exchange implementations."""
+
+    @property
+    @abstractmethod
+    def exchange_id(self) -> str:
+        """Unique exchange identifier (e.g., 'binance', 'bybit')."""
+        ...
+
+    @property
+    @abstractmethod
+    def fee_schedule(self) -> FeeSchedule:
+        """Current fee schedule for this exchange."""
+        ...
 
     @abstractmethod
     async def get_all_pairs(self) -> list[TradingPair]:
@@ -41,14 +54,21 @@ class ExchangeBase(ABC):
         quantity: float,
         price: float | None = None,
     ) -> Order:
-        """
-        Place a market (price=None) or limit order.
-
-        Returns filled Order with actual_price and fee populated.
-        """
+        """Place a market (price=None) or limit order."""
         ...
 
     @abstractmethod
     async def close(self) -> None:
         """Clean up resources."""
         ...
+
+    # --- Cross-exchange methods (optional, default raises) ---
+
+    async def get_withdrawal_fee(self, asset: str, chain: str) -> float:
+        raise NotImplementedError("Withdrawal not supported")
+
+    async def withdraw(self, asset: str, amount: float, address: str, chain: str) -> str:
+        raise NotImplementedError("Withdrawal not supported")
+
+    async def get_deposit_address(self, asset: str, chain: str) -> str:
+        raise NotImplementedError("Deposit address not supported")

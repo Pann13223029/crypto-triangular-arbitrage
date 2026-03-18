@@ -85,6 +85,58 @@ class ScannerConfig:
 
 
 @dataclass
+class FeeSchedule:
+    """Exchange-agnostic fee schedule."""
+
+    exchange_id: str = ""
+    taker_fee: float = 0.001
+    maker_fee: float = 0.001
+    withdrawal_fees: dict[str, dict[str, float]] = field(default_factory=dict)
+
+    def round_trip_cost(self, other: "FeeSchedule") -> float:
+        """Total taker fee cost for buy on self + sell on other."""
+        return self.taker_fee + other.taker_fee
+
+
+@dataclass
+class CrossExchangeConfig:
+    """Cross-exchange arbitrage settings."""
+
+    enabled: bool = True
+    min_net_spread: float = 0.0005  # 0.05% minimum after fees
+    max_position_size_usd: float = 500.0
+    staleness_threshold_ms: int = 1000  # 1 second
+    max_concurrent_arbs: int = 3
+    dedup_cooldown_ms: int = 3000  # 3 seconds
+    symbols: list[str] = field(
+        default_factory=lambda: [
+            "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
+            "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT",
+        ]
+    )
+
+
+@dataclass
+class MultiSimConfig:
+    """Multi-exchange simulation parameters."""
+
+    exchange_ids: list[str] = field(
+        default_factory=lambda: ["sim_binance", "sim_bybit", "sim_okx"]
+    )
+    initial_balances_per_exchange: dict[str, float] = field(
+        default_factory=lambda: {
+            "USDT": 10000.0,
+            "BTC": 0.15,
+            "ETH": 4.0,
+            "BNB": 15.0,
+        }
+    )
+    ou_theta: float = 0.1  # Mean reversion speed
+    ou_sigma: float = 0.002  # Spread volatility (~0.2%)
+    ou_mu: float = 0.0  # Long-run mean (zero)
+
+
+@dataclass
 class Config:
     """Root configuration."""
 
@@ -95,3 +147,5 @@ class Config:
     simulation: SimulationConfig = field(default_factory=SimulationConfig)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     scanner: ScannerConfig = field(default_factory=ScannerConfig)
+    cross_exchange: CrossExchangeConfig = field(default_factory=CrossExchangeConfig)
+    multi_sim: MultiSimConfig = field(default_factory=MultiSimConfig)

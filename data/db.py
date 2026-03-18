@@ -5,6 +5,7 @@ import aiosqlite
 
 from config.settings import DatabaseConfig
 from core.models import Direction, Opportunity, Order, OrderStatus
+from cross_exchange.models import CrossExchangeOpportunity
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,49 @@ CREATE TABLE IF NOT EXISTS trades (
 CREATE INDEX IF NOT EXISTS idx_opp_session ON opportunities(session_id);
 CREATE INDEX IF NOT EXISTS idx_opp_timestamp ON opportunities(timestamp_ms);
 CREATE INDEX IF NOT EXISTS idx_trades_opp ON trades(opportunity_id);
+
+CREATE TABLE IF NOT EXISTS cross_opportunities (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER,
+    timestamp_ms INTEGER NOT NULL,
+    symbol TEXT NOT NULL,
+    buy_exchange TEXT NOT NULL,
+    sell_exchange TEXT NOT NULL,
+    buy_price REAL NOT NULL,
+    sell_price REAL NOT NULL,
+    gross_spread REAL NOT NULL,
+    net_spread REAL NOT NULL,
+    position_size REAL DEFAULT 0.0,
+    executed INTEGER DEFAULT 0,
+    skip_reason TEXT DEFAULT '',
+    FOREIGN KEY (session_id) REFERENCES sessions(id)
+);
+
+CREATE TABLE IF NOT EXISTS cross_trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    opportunity_id INTEGER,
+    exchange_id TEXT NOT NULL,
+    side TEXT NOT NULL,
+    expected_price REAL,
+    actual_price REAL,
+    quantity REAL,
+    fee REAL DEFAULT 0.0,
+    status TEXT NOT NULL,
+    timestamp_ms INTEGER NOT NULL,
+    FOREIGN KEY (opportunity_id) REFERENCES cross_opportunities(id)
+);
+
+CREATE TABLE IF NOT EXISTS exchange_health_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    exchange_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    reason TEXT DEFAULT '',
+    timestamp_ms INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_cx_opp_session ON cross_opportunities(session_id);
+CREATE INDEX IF NOT EXISTS idx_cx_trades_opp ON cross_trades(opportunity_id);
+CREATE INDEX IF NOT EXISTS idx_health_exchange ON exchange_health_log(exchange_id);
 """
 
 
@@ -161,6 +205,54 @@ class Database:
                 order.quantity,
                 order.fee,
                 order.slippage,
+                order.status.value,
+                order.timestamp_ms,
+            ),
+        )
+        await self._db.commit()
+        return cursor.lastrowid
+
+    async def log_cross_opportunity(self, opp: CrossExchangeOpportunity) -> int:
+        """Log a cross-exchange opportunity. Returns ID."""
+        cursor = await self._db.execute(
+            """INSERT INTO cross_opportunities
+               (session_id, timestamp_ms, symbol, buy_exchange, sell_exchange,
+                buy_price, sell_price, gross_spread, net_spread,
+                executed, skip_reason)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                self._session_id,
+                opp.timestamp_ms,
+                opp.symbol,
+                opp.buy_exchange,
+                opp.sell_exchange,
+                opp.buy_price,
+                opp.sell_price,
+                opp.gross_spread,
+                opp.net_spread,
+                1 if opp.executed else 0,
+                opp.skip_reason,
+            ),
+        )
+        await self._db.commit()
+        return cursor.lastrowid
+
+    async def log_cross_trade(self, opp_id: int, exchange_id: str, order: Order) -> int:
+        """Log a cross-exchange trade leg."""
+        cursor = await self._db.execute(
+            """INSERT INTO cross_trades
+               (opportunity_id, exchange_id, side,
+                expected_price, actual_price, quantity, fee,
+                status, timestamp_ms)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                opp_id,
+                exchange_id,
+                order.side.value,
+                order.expected_price,
+                order.actual_price,
+                order.quantity,
+                order.fee,
                 order.status.value,
                 order.timestamp_ms,
             ),

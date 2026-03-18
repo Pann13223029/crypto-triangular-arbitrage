@@ -43,6 +43,11 @@ def parse_args():
         help="Trading mode (default: simulation)",
     )
     parser.add_argument(
+        "--cross-exchange",
+        action="store_true",
+        help="Enable cross-exchange arbitrage simulation",
+    )
+    parser.add_argument(
         "--dashboard",
         action="store_true",
         help="Enable real-time CLI dashboard",
@@ -343,6 +348,181 @@ async def run_simulation(args):
         print("\n" + "=" * 60)
 
 
+async def run_cross_exchange_simulation(args):
+    """Cross-exchange simulation — real base prices, simulated divergence."""
+    from config.settings import Config
+    from cross_exchange.scanner import CrossExchangeScanner
+    from cross_exchange.balance_tracker import BalanceTracker
+    from data.db import Database
+    from data.price_cache import PriceCache
+    from exchange.binance_rest import BinanceREST
+    from exchange.binance_ws import BinanceWebSocket
+    from exchange.multi_sim import MultiExchangeSimulator
+
+    logger = logging.getLogger("main.cross")
+    config = Config()
+
+    logger.info("=== Cross-Exchange Arbitrage Simulation ===")
+    logger.info("Exchanges: %s", ", ".join(config.multi_sim.exchange_ids))
+    logger.info("Symbols: %s", ", ".join(config.cross_exchange.symbols))
+
+    # 1. Fetch pairs from Binance (used as base)
+    rest = BinanceREST()
+    pairs = await rest.get_all_pairs(quote_assets=["USDT"])
+    await rest.close()
+    logger.info("Loaded %d USDT pairs", len(pairs))
+
+    # 2. Multi-exchange simulator
+    multi_sim = MultiExchangeSimulator(config.multi_sim)
+    multi_sim.load_pairs(pairs)
+
+    # 3. Cross-exchange scanner
+    fee_schedules = multi_sim.get_fee_schedules()
+    cx_scanner = CrossExchangeScanner(
+        symbols=config.cross_exchange.symbols,
+        fee_schedules=fee_schedules,
+        min_net_spread=config.cross_exchange.min_net_spread,
+        staleness_ms=config.cross_exchange.staleness_threshold_ms,
+        dedup_cooldown_ms=config.cross_exchange.dedup_cooldown_ms,
+    )
+
+    # 4. Balance tracker
+    balance_tracker = BalanceTracker(multi_sim.exchanges)
+    await balance_tracker.refresh_all()
+
+    # 5. Database
+    db = Database(config.database)
+    await db.connect()
+    session_id = await db.start_session("cross_exchange_sim")
+
+    # 6. Price cache + WebSocket
+    price_cache = PriceCache()
+    cx_opportunities: list[dict] = []
+
+    # WebSocket callback — inject base price, generate divergent, scan
+    def on_ticker(ticker):
+        price_cache.update_ticker(ticker)
+
+        # Only process symbols we're tracking
+        if ticker.symbol not in cx_scanner.books:
+            return
+
+        # Generate divergent prices
+        divergent = multi_sim.inject_base_ticker(ticker)
+
+        # Feed each exchange's price into the scanner
+        for ex_id, ex_ticker in divergent.items():
+            opp = cx_scanner.update(ex_id, ex_ticker)
+            if opp is not None:
+                cx_opportunities.append({
+                    "symbol": opp.symbol,
+                    "buy": opp.buy_exchange,
+                    "sell": opp.sell_exchange,
+                    "gross": opp.gross_spread,
+                    "net": opp.net_spread,
+                    "buy_price": opp.buy_price,
+                    "sell_price": opp.sell_price,
+                })
+
+    ws = BinanceWebSocket(
+        config=config.websocket,
+        on_ticker=on_ticker,
+    )
+
+    # 7. Duration watchdog
+    async def duration_watchdog():
+        if args.duration > 0:
+            await asyncio.sleep(args.duration)
+            logger.info("Duration limit reached (%ds)", args.duration)
+            await ws.stop()
+
+    watchdog_task = asyncio.create_task(duration_watchdog()) if args.duration > 0 else None
+
+    # 8. Periodic stats
+    async def stats_loop():
+        while True:
+            await asyncio.sleep(10)
+            s = cx_scanner.stats()
+            logger.info(
+                "Cross-exchange | Updates: %d | Opportunities: %d | Deduped: %d | Symbols: %d",
+                s["total_updates"], s["total_opportunities"],
+                s["total_deduped"], s["tracked_symbols"],
+            )
+
+    stats_task = asyncio.create_task(stats_loop())
+
+    # Subscribe only to cross-exchange symbols
+    symbols_to_subscribe = set(config.cross_exchange.symbols)
+    logger.info("Subscribing to %d symbols for cross-exchange scanning...", len(symbols_to_subscribe))
+
+    try:
+        await ws.listen_with_reconnect(symbols_to_subscribe)
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        pass
+    finally:
+        logger.info("Shutting down...")
+        stats_task.cancel()
+        if watchdog_task:
+            watchdog_task.cancel()
+        await ws.stop()
+
+        # Log opportunities to DB
+        for opp_data in cx_opportunities:
+            from cross_exchange.models import CrossExchangeOpportunity
+            opp = CrossExchangeOpportunity(
+                symbol=opp_data["symbol"],
+                buy_exchange=opp_data["buy"],
+                sell_exchange=opp_data["sell"],
+                buy_price=opp_data["buy_price"],
+                sell_price=opp_data["sell_price"],
+                gross_spread=opp_data["gross"],
+                net_spread=opp_data["net"],
+            )
+            await db.log_cross_opportunity(opp)
+
+        await db.end_session()
+        await db.close()
+
+        # Summary
+        s = cx_scanner.stats()
+        b = balance_tracker.stats()
+
+        print("\n" + "=" * 60)
+        print("  CROSS-EXCHANGE SESSION SUMMARY")
+        print("=" * 60)
+
+        print(f"\n  Exchanges:          {', '.join(config.multi_sim.exchange_ids)}")
+        print(f"  Symbols tracked:    {s['tracked_symbols']}")
+        print(f"  Total updates:      {s['total_updates']:,}")
+        print(f"  Opportunities:      {s['total_opportunities']}")
+        print(f"  Deduped:            {s['total_deduped']}")
+        print(f"  WebSocket msgs:     {ws.stats()['total_messages']:,}")
+
+        if cx_opportunities:
+            net_spreads = [o["net"] for o in cx_opportunities]
+            print(f"\n  OPPORTUNITY STATS")
+            print(f"    Best net spread:  {max(net_spreads):.4%}")
+            print(f"    Avg net spread:   {sum(net_spreads)/len(net_spreads):.4%}")
+            print(f"    Total found:      {len(cx_opportunities)}")
+
+            print(f"\n  RECENT OPPORTUNITIES")
+            for opp in cx_opportunities[-10:]:
+                print(
+                    f"    {opp['symbol']:<10} BUY {opp['buy']:<14} "
+                    f"SELL {opp['sell']:<14} "
+                    f"net: {opp['net']:.4%}"
+                )
+        else:
+            print("\n  No cross-exchange opportunities found.")
+
+        print(f"\n  BALANCES PER EXCHANGE")
+        for ex_id, bals in b.get("per_exchange", {}).items():
+            usdt = bals.get("USDT", 0)
+            print(f"    {ex_id:<14}  USDT: {usdt:>12.2f}")
+
+        print("\n" + "=" * 60)
+
+
 async def main():
     args = parse_args()
     setup_logging(args.log_level, dashboard=args.dashboard)
@@ -355,7 +535,10 @@ async def main():
         print("Live mode not yet implemented — use simulation")
         sys.exit(1)
 
-    await run_simulation(args)
+    if args.cross_exchange:
+        await run_cross_exchange_simulation(args)
+    else:
+        await run_simulation(args)
 
 
 if __name__ == "__main__":

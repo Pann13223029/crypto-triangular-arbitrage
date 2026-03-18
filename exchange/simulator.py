@@ -6,7 +6,7 @@ import random
 import uuid
 from time import time_ns
 
-from config.settings import FeeConfig, SimulationConfig
+from config.settings import FeeConfig, FeeSchedule, SimulationConfig
 from core.models import (
     Order,
     OrderBook,
@@ -33,9 +33,16 @@ class SimulatedExchange(ExchangeBase):
         self,
         fee_config: FeeConfig | None = None,
         sim_config: SimulationConfig | None = None,
+        exchange_id: str = "simulated",
     ):
         self.fee_config = fee_config or FeeConfig()
         self.sim_config = sim_config or SimulationConfig()
+        self._exchange_id = exchange_id
+        self._fee_schedule = FeeSchedule(
+            exchange_id=exchange_id,
+            taker_fee=self.fee_config.effective_fee,
+            maker_fee=self.fee_config.maker_fee,
+        )
 
         # Virtual balances
         self.balances: dict[str, float] = dict(self.sim_config.initial_balances)
@@ -70,6 +77,14 @@ class SimulatedExchange(ExchangeBase):
     def reset_balances(self) -> None:
         """Reset to initial balances."""
         self.balances = dict(self.sim_config.initial_balances)
+
+    @property
+    def exchange_id(self) -> str:
+        return self._exchange_id
+
+    @property
+    def fee_schedule(self) -> FeeSchedule:
+        return self._fee_schedule
 
     async def get_all_pairs(self) -> list[TradingPair]:
         return list(self.pairs.values())
