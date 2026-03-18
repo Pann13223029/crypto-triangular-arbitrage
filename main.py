@@ -697,6 +697,7 @@ async def run_live_cross_exchange(args):
     from exchange.binance_ws import BinanceWebSocket
     from exchange.bybit_ws import BybitWebSocket
     from exchange.okx_ws import OKXWebSocket
+    from exchange.kucoin_ws import KuCoinWebSocket
 
     logger = logging.getLogger("main.live")
     config = Config()
@@ -722,23 +723,23 @@ async def run_live_cross_exchange(args):
         bn_secret = os.getenv("BINANCE_API_SECRET", "")
         by_key = os.getenv("BYBIT_API_KEY", "")
         by_secret = os.getenv("BYBIT_API_SECRET", "")
+        kc_key = os.getenv("KUCOIN_API_KEY", "")
+        kc_secret = os.getenv("KUCOIN_API_SECRET", "")
+        kc_pass = os.getenv("KUCOIN_PASSPHRASE", "")
         ok_key = os.getenv("OKX_API_KEY", "")
         ok_secret = os.getenv("OKX_API_SECRET", "")
         ok_pass = os.getenv("OKX_PASSPHRASE", "")
-
-        missing = []
-        if not bn_key: missing.append("BINANCE_API_KEY")
-        if not by_key: missing.append("BYBIT_API_KEY")
-        if not ok_key: missing.append("OKX_API_KEY")
-
-        if missing:
-            logger.warning("Missing API keys: %s — execution disabled for those exchanges", ", ".join(missing))
 
         # Create live exchange instances for available keys
         if bn_key and bn_secret:
             from exchange.binance_live import BinanceLiveExchange
             live_exchanges["binance"] = BinanceLiveExchange(bn_key, bn_secret)
             logger.info("Binance: LIVE exchange connected")
+
+        if kc_key and kc_secret:
+            from exchange.kucoin_rest import KuCoinExchange
+            live_exchanges["kucoin"] = KuCoinExchange(kc_key, kc_secret, kc_pass)
+            logger.info("KuCoin: LIVE exchange connected")
 
         if by_key and by_secret:
             from exchange.bybit_rest import BybitExchange
@@ -749,6 +750,9 @@ async def run_live_cross_exchange(args):
             from exchange.okx_rest import OKXExchange
             live_exchanges["okx"] = OKXExchange(ok_key, ok_secret, ok_pass)
             logger.info("OKX: LIVE exchange connected")
+
+        if len(live_exchanges) < 2:
+            logger.warning("Only %d exchange(s) with API keys. Need 2+ for execution.", len(live_exchanges))
 
         if len(live_exchanges) < 2:
             logger.error("Need at least 2 exchange API keys for execution. Got %d.", len(live_exchanges))
@@ -792,6 +796,7 @@ async def run_live_cross_exchange(args):
     # Fee schedules per exchange
     fee_schedules = {
         "binance": FeeSchedule("binance", taker_fee=0.00075, maker_fee=0.00075),
+        "kucoin": FeeSchedule("kucoin", taker_fee=0.001, maker_fee=0.001),
         "bybit": FeeSchedule("bybit", taker_fee=0.001, maker_fee=0.001),
         "okx": FeeSchedule("okx", taker_fee=0.001, maker_fee=0.0008),
     }
@@ -905,12 +910,13 @@ async def run_live_cross_exchange(args):
             if balance_tracker:
                 await balance_tracker.refresh_all()
 
-    # Create 3 WebSocket connections
+    # Create WebSocket connections for available exchanges
     bn_ws = BinanceWebSocket(
         config=config.websocket,
         on_ticker=make_handler("binance"),
         use_book_ticker=True,
     )
+    kc_ws = KuCoinWebSocket(on_ticker=make_handler("kucoin"))
     by_ws = BybitWebSocket(on_ticker=make_handler("bybit"))
     ok_ws = OKXWebSocket(on_ticker=make_handler("okx"))
 
@@ -933,19 +939,21 @@ async def run_live_cross_exchange(args):
             profitable = [o for o in all_opportunities if o.net_spread > 0]
             logger.info(
                 "Live | Updates: %d | Opps: %d | Profitable: %d | "
-                "BN: %d msg | BY: %d msg | OKX: %d msg",
+                "BN: %d | KC: %d | BY: %d | OKX: %d",
                 s["total_updates"], s["total_opportunities"],
                 len(profitable),
-                bn_ws.total_messages, by_ws.total_messages, ok_ws.total_messages,
+                bn_ws.total_messages, kc_ws.total_messages,
+                by_ws.total_messages, ok_ws.total_messages,
             )
 
     logger.info("Connecting to 3 exchanges...")
 
     await bn_ws.connect(sym_set)
+    await kc_ws.connect(sym_set)
     await by_ws.connect(sym_set)
     await ok_ws.connect(sym_set)
 
-    logger.info("All 3 exchanges connected. Scanning...")
+    logger.info("All exchanges connected. Scanning...")
 
     watchdog_task = asyncio.create_task(duration_watchdog()) if args.duration > 0 else None
     stats_task = asyncio.create_task(stats_loop())
@@ -954,6 +962,7 @@ async def run_live_cross_exchange(args):
     try:
         await asyncio.gather(
             bn_ws.listen(),
+            kc_ws.listen(),
             by_ws.listen(),
             ok_ws.listen(),
         )
@@ -968,6 +977,7 @@ async def run_live_cross_exchange(args):
             await opp_queue.put(None)
             await executor_task
         await bn_ws.stop()
+        await kc_ws.stop()
         await by_ws.stop()
         await ok_ws.stop()
 
@@ -1016,11 +1026,13 @@ async def run_live_cross_exchange(args):
             total_fees = sum(r.total_fees for r in trade_results)
             print(f"    Total fees:        ${total_fees:>11.4f}")
 
+        total_msgs = bn_ws.total_messages + kc_ws.total_messages + by_ws.total_messages + ok_ws.total_messages
         print(f"\n  EXCHANGES")
         print(f"    Binance msgs:       {bn_ws.total_messages:>12,}")
+        print(f"    KuCoin msgs:        {kc_ws.total_messages:>12,}")
         print(f"    Bybit msgs:         {by_ws.total_messages:>12,}")
         print(f"    OKX msgs:           {ok_ws.total_messages:>12,}")
-        print(f"    Total:              {bn_ws.total_messages + by_ws.total_messages + ok_ws.total_messages:>12,}")
+        print(f"    Total:              {total_msgs:>12,}")
 
         print(f"\n  SCANNER")
         print(f"    Symbols tracked:    {s['tracked_symbols']:>12}")
