@@ -133,15 +133,19 @@ class SimulatedExchange(ExchangeBase):
         if ticker is None:
             return self._failed_order(symbol, side, quantity, "No price data")
 
-        # Calculate fill price with slippage
-        base_price = ticker.ask if side == OrderSide.BUY else ticker.bid
-        if base_price <= 0:
-            return self._failed_order(symbol, side, quantity, "Zero price")
-
-        fill_price = self._apply_slippage(base_price, side)
-
-        # Calculate amounts
-        fee_rate = self.fee_config.effective_fee
+        # Determine if this is a limit (maker) or market (taker) order
+        is_limit = price is not None
+        if is_limit:
+            # Limit order: fill at the limit price, use maker fee
+            fill_price = price
+            fee_rate = self.fee_config.maker_fee
+        else:
+            # Market order: fill at market with slippage, use taker fee
+            base_price = ticker.ask if side == OrderSide.BUY else ticker.bid
+            if base_price <= 0:
+                return self._failed_order(symbol, side, quantity, "Zero price")
+            fill_price = self._apply_slippage(base_price, side)
+            fee_rate = self.fee_config.effective_fee
 
         if side == OrderSide.BUY:
             # Spending quote to buy base

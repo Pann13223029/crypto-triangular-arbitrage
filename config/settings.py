@@ -121,6 +121,9 @@ class CrossExchangeConfig:
         ]
     )
     max_spread_anomaly: float = 0.05  # 5% — reject spreads above this (likely stale)
+    use_maker_sell: bool = True  # Use limit (maker) order on sell side
+    maker_sell_offset: float = 0.0002  # Place sell limit 0.02% below bid
+    maker_sell_timeout_sec: float = 2.0  # Cancel unfilled maker after this
 
 
 @dataclass

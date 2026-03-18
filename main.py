@@ -612,6 +612,8 @@ async def run_cross_exchange_simulation(args):
         print(f"    Both filled:        {e['both_filled']:>10}")
         print(f"    Aborts:             {e['aborts']:>10}")
         print(f"    Emergency hedges:   {e['emergency_hedges']:>10}")
+        print(f"    Maker sells:        {e.get('maker_sells', 0):>10}")
+        print(f"    Maker timeouts:     {e.get('maker_timeouts', 0):>10}")
         print(f"    Win rate:           {e['win_rate']:>10}")
 
         print(f"\n  P&L (USD)")
