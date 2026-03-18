@@ -54,6 +54,11 @@ def parse_args():
         help="Live cross-exchange scan with real prices from 3 exchanges",
     )
     parser.add_argument(
+        "--execute",
+        action="store_true",
+        help="Enable LIVE order execution (requires API keys in .env)",
+    )
+    parser.add_argument(
         "--dashboard",
         action="store_true",
         help="Enable real-time CLI dashboard",
@@ -680,9 +685,12 @@ async def run_cross_exchange_simulation(args):
 
 
 async def run_live_cross_exchange(args):
-    """Live cross-exchange scanning with REAL prices from Binance + Bybit + OKX."""
+    """Live cross-exchange scanning + optional execution with REAL prices."""
     from config.settings import Config, FeeSchedule
     from cross_exchange.scanner import CrossExchangeScanner
+    from cross_exchange.executor import CrossExchangeExecutor
+    from cross_exchange.risk_manager import CrossExchangeRiskManager
+    from cross_exchange.balance_tracker import BalanceTracker
     from cross_exchange.models import CrossExchangeOpportunity
     from monitoring.metrics import PipelineMetrics, TradeMetric
     from data.db import Database
@@ -694,10 +702,92 @@ async def run_live_cross_exchange(args):
     config = Config()
     symbols = config.cross_exchange.symbols
 
+    execute_mode = args.execute and not args.dry_run
+    mode_str = "LIVE EXECUTION" if execute_mode else "SCAN ONLY (dry-run)"
+
     logger.info("=== LIVE Cross-Exchange Scanner ===")
     logger.info("Exchanges: Binance + Bybit + OKX")
     logger.info("Symbols: %s", ", ".join(symbols))
-    logger.info("Mode: %s", "DRY-RUN (scan only)" if args.dry_run else "LIVE EXECUTION")
+    logger.info("Mode: %s", mode_str)
+
+    # --- Live exchange setup (for execution) ---
+    live_exchanges: dict[str, object] = {}
+    balance_tracker = None
+    cx_executor = None
+    cx_risk = None
+    trade_results = []
+
+    if execute_mode:
+        bn_key = os.getenv("BINANCE_API_KEY", "")
+        bn_secret = os.getenv("BINANCE_API_SECRET", "")
+        by_key = os.getenv("BYBIT_API_KEY", "")
+        by_secret = os.getenv("BYBIT_API_SECRET", "")
+        ok_key = os.getenv("OKX_API_KEY", "")
+        ok_secret = os.getenv("OKX_API_SECRET", "")
+        ok_pass = os.getenv("OKX_PASSPHRASE", "")
+
+        missing = []
+        if not bn_key: missing.append("BINANCE_API_KEY")
+        if not by_key: missing.append("BYBIT_API_KEY")
+        if not ok_key: missing.append("OKX_API_KEY")
+
+        if missing:
+            logger.warning("Missing API keys: %s — execution disabled for those exchanges", ", ".join(missing))
+
+        # Create live exchange instances for available keys
+        if bn_key and bn_secret:
+            from exchange.binance_live import BinanceLiveExchange
+            live_exchanges["binance"] = BinanceLiveExchange(bn_key, bn_secret)
+            logger.info("Binance: LIVE exchange connected")
+
+        if by_key and by_secret:
+            from exchange.bybit_rest import BybitExchange
+            live_exchanges["bybit"] = BybitExchange(by_key, by_secret)
+            logger.info("Bybit: LIVE exchange connected")
+
+        if ok_key and ok_secret:
+            from exchange.okx_rest import OKXExchange
+            live_exchanges["okx"] = OKXExchange(ok_key, ok_secret, ok_pass)
+            logger.info("OKX: LIVE exchange connected")
+
+        if len(live_exchanges) < 2:
+            logger.error("Need at least 2 exchange API keys for execution. Got %d.", len(live_exchanges))
+            execute_mode = False
+        else:
+            # Load pairs on all live exchanges
+            for ex in live_exchanges.values():
+                await ex.get_all_pairs()
+
+            balance_tracker = BalanceTracker(live_exchanges)
+            await balance_tracker.refresh_all()
+            logger.info("Balances loaded: %s", balance_tracker.stats())
+
+            cx_risk = CrossExchangeRiskManager(config.trading, config.cross_exchange)
+            cx_executor = CrossExchangeExecutor(
+                exchanges=live_exchanges,
+                trading_config=config.trading,
+                cx_config=config.cross_exchange,
+            )
+
+            # Safety confirmation
+            print("\n" + "=" * 60)
+            print("  ⚠  LIVE EXECUTION MODE")
+            print("=" * 60)
+            print(f"  Exchanges: {', '.join(live_exchanges.keys())}")
+            print(f"  Max position: ${config.cross_exchange.max_position_size_usd}")
+            print(f"  Daily loss limit: ${config.trading.daily_loss_limit_usd}")
+            print(f"  Symbols: {len(symbols)}")
+            print("=" * 60)
+            confirm = input("  Type 'YES' to confirm live execution: ")
+            if confirm.strip() != "YES":
+                logger.info("Execution cancelled by user")
+                execute_mode = False
+                for ex in live_exchanges.values():
+                    await ex.close()
+                live_exchanges = {}
+
+    if not execute_mode:
+        logger.info("Running in SCAN-ONLY mode")
 
     # Fee schedules per exchange
     fee_schedules = {
@@ -725,6 +815,7 @@ async def run_live_cross_exchange(args):
 
     # Track all opportunities
     all_opportunities: list[CrossExchangeOpportunity] = []
+    opp_queue: asyncio.Queue = asyncio.Queue() if execute_mode else None
 
     # WebSocket callbacks — one per exchange, all feed into same scanner
     def make_handler(ex_id):
@@ -744,14 +835,75 @@ async def run_live_cross_exchange(args):
                     opp.gross_spread * 100, opp.net_spread * 100,
                     net_flag,
                 )
-                tm = TradeMetric(
-                    opportunity_detected_ms=opp.timestamp_ms,
-                    symbol=opp.symbol,
-                    net_pnl=opp.net_spread,
-                    aborted=True,  # Scan-only mode
-                )
-                metrics.record(tm)
+
+                # Queue for execution if in live mode
+                if execute_mode and opp.net_spread > 0 and opp_queue is not None:
+                    try:
+                        opp_queue.put_nowait(opp)
+                    except asyncio.QueueFull:
+                        pass
+                else:
+                    tm = TradeMetric(
+                        opportunity_detected_ms=opp.timestamp_ms,
+                        symbol=opp.symbol,
+                        net_pnl=opp.net_spread,
+                        aborted=True,
+                    )
+                    metrics.record(tm)
         return handler
+
+    # Execution processor (only runs in execute mode)
+    async def execute_opportunities():
+        if not execute_mode or opp_queue is None:
+            return
+        while True:
+            opp = await opp_queue.get()
+            if opp is None:
+                break
+
+            # Risk check
+            approved, reason = cx_risk.check(opp)
+            if not approved:
+                opp.skip_reason = reason
+                await db.log_cross_opportunity(opp)
+                continue
+
+            # Check both exchanges are available
+            if opp.buy_exchange not in live_exchanges or opp.sell_exchange not in live_exchanges:
+                opp.skip_reason = f"Exchange not connected: {opp.buy_exchange} or {opp.sell_exchange}"
+                await db.log_cross_opportunity(opp)
+                continue
+
+            # Execute
+            cx_risk.on_arb_start()
+            opp.executed = True
+            opp_id = await db.log_cross_opportunity(opp)
+
+            tm = TradeMetric(
+                opportunity_detected_ms=opp.timestamp_ms,
+                symbol=opp.symbol,
+                execution_start_ms=time_ns() // 1_000_000,
+            )
+
+            result = await cx_executor.execute(opp)
+            tm.execution_end_ms = time_ns() // 1_000_000
+            tm.net_pnl = result.net_pnl
+            metrics.record(tm)
+            trade_results.append(result)
+
+            if result.buy_order:
+                await db.log_cross_trade(opp_id, opp.buy_exchange, result.buy_order)
+            if result.sell_order:
+                await db.log_cross_trade(opp_id, opp.sell_exchange, result.sell_order)
+
+            cx_risk.record_trade_result(
+                result.net_pnl,
+                had_emergency_hedge=result.hedge_order is not None,
+            )
+            cx_risk.on_arb_end()
+
+            if balance_tracker:
+                await balance_tracker.refresh_all()
 
     # Create 3 WebSocket connections
     bn_ws = BinanceWebSocket(
@@ -797,6 +949,7 @@ async def run_live_cross_exchange(args):
 
     watchdog_task = asyncio.create_task(duration_watchdog()) if args.duration > 0 else None
     stats_task = asyncio.create_task(stats_loop())
+    executor_task = asyncio.create_task(execute_opportunities()) if execute_mode else None
 
     try:
         await asyncio.gather(
@@ -811,14 +964,30 @@ async def run_live_cross_exchange(args):
         stats_task.cancel()
         if watchdog_task:
             watchdog_task.cancel()
+        if executor_task and opp_queue:
+            await opp_queue.put(None)
+            await executor_task
         await bn_ws.stop()
         await by_ws.stop()
         await ok_ws.stop()
 
-        # Log opportunities to DB
+        # Close live exchanges
+        for ex in live_exchanges.values():
+            await ex.close()
+
+        # Log scan-only opportunities to DB (executed ones already logged)
         for opp in all_opportunities:
-            await db.log_cross_opportunity(opp)
-        await db.end_session()
+            if not opp.executed:
+                await db.log_cross_opportunity(opp)
+
+        if execute_mode and cx_executor:
+            await db.end_session(
+                gross_pnl=cx_executor.total_profit - cx_executor.total_loss,
+                net_pnl=cx_executor.total_profit - cx_executor.total_loss,
+                fees_paid=sum(r.total_fees for r in trade_results),
+            )
+        else:
+            await db.end_session()
         await db.close()
 
         # Summary
@@ -827,8 +996,25 @@ async def run_live_cross_exchange(args):
         unprofitable = [o for o in all_opportunities if o.net_spread <= 0]
 
         print("\n" + "=" * 70)
-        print("  LIVE CROSS-EXCHANGE SCAN SUMMARY")
+        print(f"  LIVE CROSS-EXCHANGE {'EXECUTION' if execute_mode else 'SCAN'} SUMMARY")
         print("=" * 70)
+
+        if execute_mode and cx_executor:
+            e = cx_executor.stats()
+            print(f"\n  EXECUTION")
+            print(f"    Total trades:       {e['total_executions']:>12}")
+            print(f"    Both filled:        {e['both_filled']:>12}")
+            print(f"    Aborts:             {e['aborts']:>12}")
+            print(f"    Emergency hedges:   {e['emergency_hedges']:>12}")
+            print(f"    Maker sells:        {e.get('maker_sells', 0):>12}")
+            print(f"    Win rate:           {e['win_rate']:>12}")
+            pnl = e['net_pnl']
+            print(f"\n  P&L (USD)")
+            print(f"    Net P&L:          {'+'if pnl>=0 else ''}${pnl:>11.4f}")
+            print(f"    Gross profit:      ${e['total_profit']:>11.4f}")
+            print(f"    Gross loss:       -${e['total_loss']:>11.4f}")
+            total_fees = sum(r.total_fees for r in trade_results)
+            print(f"    Total fees:        ${total_fees:>11.4f}")
 
         print(f"\n  EXCHANGES")
         print(f"    Binance msgs:       {bn_ws.total_messages:>12,}")
