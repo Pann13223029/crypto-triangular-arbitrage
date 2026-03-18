@@ -45,6 +45,28 @@ class Executor:
         self.total_profit = 0.0
         self.total_loss = 0.0
 
+    async def _get_usd_value(self, asset: str, amount: float) -> float:
+        """Convert an asset amount to approximate USD value."""
+        if asset in ("USDT", "BUSD", "USDC", "TUSD", "FDUSD"):
+            return amount
+
+        try:
+            ticker = await self.exchange.get_ticker(f"{asset}USDT")
+            return amount * ticker.mid
+        except (ValueError, KeyError):
+            pass
+
+        # Try via BTC
+        try:
+            ticker_btc = await self.exchange.get_ticker(f"{asset}BTC")
+            ticker_btcusdt = await self.exchange.get_ticker("BTCUSDT")
+            return amount * ticker_btc.mid * ticker_btcusdt.mid
+        except (ValueError, KeyError):
+            pass
+
+        logger.warning("Cannot determine USD value for %s", asset)
+        return amount  # Fallback: treat as USD (will be capped anyway)
+
     async def execute(self, opportunity: Opportunity) -> TradeResult:
         """
         Execute a triangle trade.
@@ -72,23 +94,41 @@ class Executor:
             opportunity.theoretical_profit * 100,
         )
 
-        # Determine starting amount
-        start_asset = tri.assets[0] if opportunity.direction == Direction.FORWARD else tri.assets[0]
-        start_balance = await self.exchange.get_balance(
-            legs[0].quote_asset if legs[0].side == OrderSide.BUY else legs[0].base_asset
-        )
-        position_size = min(
-            start_balance,
-            self.trading_config.max_position_size_usd,
-        )
+        # Determine starting asset and balance
+        first_leg = legs[0]
+        if first_leg.side == OrderSide.BUY:
+            start_asset = first_leg.quote_asset  # Spending quote to buy base
+        else:
+            start_asset = first_leg.base_asset  # Selling base for quote
 
-        if position_size <= 0:
+        start_balance = await self.exchange.get_balance(start_asset)
+
+        # Convert balance to USD for proper position sizing
+        balance_usd = await self._get_usd_value(start_asset, start_balance)
+        max_usd = self.trading_config.max_position_size_usd
+
+        if balance_usd <= 0:
             result.aborted = True
-            result.abort_reason = "Zero position size"
+            result.abort_reason = f"Zero {start_asset} balance"
             self.risk_manager.on_trade_end()
             return result
 
+        # Scale position: use the fraction of balance that equals max_position_size in USD
+        if balance_usd > max_usd:
+            position_fraction = max_usd / balance_usd
+            position_size = start_balance * position_fraction
+        else:
+            position_size = start_balance
+
+        position_usd = await self._get_usd_value(start_asset, position_size)
+
+        logger.info(
+            "  Position: %.8f %s (~$%.2f)",
+            position_size, start_asset, position_usd,
+        )
+
         current_amount = position_size
+        current_asset = start_asset
         orders: list[Order] = []
 
         for i, leg in enumerate(legs):
@@ -96,8 +136,10 @@ class Executor:
             ticker = await self.exchange.get_ticker(leg.symbol)
 
             if leg.side == OrderSide.BUY:
+                # Spending current_amount of quote to buy base
                 quantity = current_amount / ticker.ask
             else:
+                # Selling current_amount of base
                 quantity = current_amount
 
             # Place order
@@ -125,7 +167,6 @@ class Executor:
                     i + 1, order.slippage * 100,
                     self.trading_config.slippage_tolerance * 100,
                 )
-                # Abort remaining legs for v1 (could hedge in future)
                 if i < len(legs) - 1:
                     result.aborted = True
                     result.abort_reason = (
@@ -136,24 +177,33 @@ class Executor:
 
             # Update current amount for next leg
             if leg.side == OrderSide.BUY:
-                current_amount = order.quantity  # Now holding base
+                # Bought base with quote — now holding base (minus fee already deducted in sim)
+                current_amount = order.quantity
+                current_asset = leg.base_asset
             else:
-                current_amount = order.quantity * order.actual_price  # Now holding quote
-                current_amount -= order.fee
+                # Sold base for quote — now holding quote (minus fee already deducted in sim)
+                current_amount = order.quantity * order.actual_price - order.fee
+                current_asset = leg.quote_asset
 
             result.total_fees += order.fee
             logger.info(
-                "  Leg %d: %s %s %.8f @ %.8f ✓",
+                "  Leg %d: %s %s %.8f @ %.8f → %.8f %s ✓",
                 i + 1, leg.side.value, leg.symbol,
                 order.quantity, order.actual_price,
+                current_amount, current_asset,
             )
 
         result.orders = orders
 
         # Calculate P&L
         if not result.aborted and len(orders) == 3:
-            result.gross_pnl = current_amount - position_size
-            result.net_pnl = result.gross_pnl  # Fees already deducted in sim
+            # P&L is in terms of the starting asset
+            # Convert both start and end to USD for accurate comparison
+            end_usd = await self._get_usd_value(current_asset, current_amount)
+            start_usd = position_usd
+
+            result.gross_pnl = end_usd - start_usd
+            result.net_pnl = result.gross_pnl  # Fees already deducted in sim fills
             self.total_executions += 1
 
             if result.net_pnl >= 0:
@@ -163,10 +213,12 @@ class Executor:
 
             self.risk_manager.record_trade_result(result.net_pnl)
 
+            pnl_pct = (result.net_pnl / start_usd * 100) if start_usd > 0 else 0
             logger.info(
-                "RESULT: %s | Gross: $%.6f | Net: $%.6f | Fees: $%.6f",
+                "RESULT: %s | P&L: $%.4f (%.4f%%) | Fees: $%.4f | Start: $%.2f → End: $%.2f",
                 "PROFIT" if result.net_pnl >= 0 else "LOSS",
-                result.gross_pnl, result.net_pnl, result.total_fees,
+                result.net_pnl, pnl_pct, result.total_fees,
+                start_usd, end_usd,
             )
         else:
             self.total_aborts += 1

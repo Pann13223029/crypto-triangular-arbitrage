@@ -293,17 +293,54 @@ async def run_simulation(args):
         await db.close()
         await sim_exchange.close()
 
-        # Print summary
+        # Print formatted summary
+        s = scanner.stats()
+        e = executor.stats()
+        r = risk_manager.stats()
+        o = order_manager.stats()
+        x = sim_exchange.stats()
+        w = ws.stats()
+        bal = x.get("balances", {})
+
         print("\n" + "=" * 60)
-        print("SESSION SUMMARY")
+        print("  SESSION SUMMARY")
         print("=" * 60)
-        print(f"  Scanner:   {scanner.stats()}")
-        print(f"  Executor:  {executor.stats()}")
-        print(f"  Risk:      {risk_manager.stats()}")
-        print(f"  Orders:    {order_manager.stats()}")
-        print(f"  Exchange:  {sim_exchange.stats()}")
-        print(f"  WebSocket: {ws.stats()}")
-        print("=" * 60)
+
+        print("\n  SCANNER")
+        print(f"    Ticks processed:    {s['total_ticks']:>12,}")
+        print(f"    Triangle scans:     {s['total_triangle_scans']:>12,}")
+        print(f"    Opportunities:      {s['total_opportunities']:>12}")
+        print(f"    Hit rate:           {s['hit_rate']:>12}")
+        print(f"    Tracked symbols:    {s['tracked_symbols']:>12}")
+
+        print("\n  EXECUTION")
+        print(f"    Trades executed:    {e['total_executions']:>12}")
+        print(f"    Aborted:            {e['total_aborts']:>12}")
+        print(f"    Win rate:           {o['win_rate']:>12}")
+
+        print("\n  P&L (USD)")
+        pnl = e['net_pnl']
+        pnl_sign = "+" if pnl >= 0 else ""
+        print(f"    Net P&L:          {pnl_sign}${pnl:>11.4f}")
+        print(f"    Gross profit:      ${e['total_profit']:>11.4f}")
+        print(f"    Gross loss:       -${e['total_loss']:>11.4f}")
+        print(f"    Total fees:        ${o['total_fees']:>11.4f}")
+
+        print("\n  RISK")
+        print(f"    Daily P&L:        {'+' if r['daily_pnl'] >= 0 else ''}${r['daily_pnl']:>11.4f}")
+        print(f"    Consec. losses:     {r['consecutive_losses']:>12}")
+        print(f"    Kill switch:        {'ACTIVE — ' + r['kill_reason'] if r['killed'] else 'OFF':>12}")
+        print(f"    Approved/Rejected:  {r['total_approved']}/{r['total_rejected']}")
+
+        print("\n  BALANCES")
+        for asset, amount in sorted(bal.items()):
+            print(f"    {asset:<6}  {amount:>18.8f}")
+
+        print("\n  WEBSOCKET")
+        print(f"    Messages received:  {w['total_messages']:>12,}")
+        print(f"    Reconnects:         {w['total_reconnects']:>12}")
+
+        print("\n" + "=" * 60)
 
 
 async def main():
