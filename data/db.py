@@ -5,7 +5,7 @@ import aiosqlite
 
 from config.settings import DatabaseConfig
 from core.models import Direction, Opportunity, Order, OrderStatus
-from cross_exchange.models import CrossExchangeOpportunity
+from cross_exchange.models import CrossExchangeOpportunity, Transfer
 
 logger = logging.getLogger(__name__)
 
@@ -255,6 +255,22 @@ class Database:
                 order.fee,
                 order.status.value,
                 order.timestamp_ms,
+            ),
+        )
+        await self._db.commit()
+        return cursor.lastrowid
+
+    async def log_transfer(self, transfer: Transfer) -> int:
+        """Log an inter-exchange transfer."""
+        cursor = await self._db.execute(
+            """INSERT INTO exchange_health_log
+               (exchange_id, status, reason, timestamp_ms)
+               VALUES (?, ?, ?, ?)""",
+            (
+                f"{transfer.from_exchange}→{transfer.to_exchange}",
+                transfer.status.value,
+                f"${transfer.amount:.2f} {transfer.asset} via {transfer.chain}",
+                transfer.initiated_ms,
             ),
         )
         await self._db.commit()

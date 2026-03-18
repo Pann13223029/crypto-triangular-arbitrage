@@ -137,6 +137,22 @@ class MultiSimConfig:
 
 
 @dataclass
+class RebalanceConfig:
+    """Rebalancing settings for cross-exchange capital management."""
+
+    enabled: bool = True
+    deviation_threshold: float = 0.25  # 25% deviation triggers rebalance
+    min_rebalance_usd: float = 500.0  # Minimum transfer amount
+    cooldown_sec: float = 30.0  # 30 seconds between rebalances (default for sim)
+    check_interval_sec: float = 20.0  # How often to check balances
+    target_allocation: dict[str, float] = field(default_factory=dict)
+    # e.g. {"sim_binance": 0.33, "sim_bybit": 0.33, "sim_okx": 0.34}
+    # If empty, defaults to equal allocation across all exchanges
+    preferred_chain: str = "TRC-20"  # For stablecoin transfers
+    transfer_fee_usd: float = 1.0  # Simulated transfer fee
+
+
+@dataclass
 class Config:
     """Root configuration."""
 
@@ -149,3 +165,4 @@ class Config:
     scanner: ScannerConfig = field(default_factory=ScannerConfig)
     cross_exchange: CrossExchangeConfig = field(default_factory=CrossExchangeConfig)
     multi_sim: MultiSimConfig = field(default_factory=MultiSimConfig)
+    rebalance: RebalanceConfig = field(default_factory=RebalanceConfig)

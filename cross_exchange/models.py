@@ -49,6 +49,39 @@ class CrossExchangeOpportunity:
     skip_reason: str = ""
 
 
+class TransferStatus(str, Enum):
+    PENDING = "PENDING"
+    SENT = "SENT"
+    CONFIRMED = "CONFIRMED"
+    FAILED = "FAILED"
+
+
+@dataclass
+class Transfer:
+    """A fund transfer between exchanges."""
+
+    from_exchange: str
+    to_exchange: str
+    asset: str
+    amount: float
+    fee: float = 0.0
+    chain: str = "TRC-20"
+    status: TransferStatus = TransferStatus.PENDING
+    tx_hash: str = ""
+    initiated_ms: int = field(default_factory=lambda: time_ns() // 1_000_000)
+    confirmed_ms: int = 0
+
+
+@dataclass
+class RebalanceDecision:
+    """A rebalancing action plan."""
+
+    transfers: list[Transfer] = field(default_factory=list)
+    reason: str = ""
+    total_amount: float = 0.0
+    total_fees: float = 0.0
+
+
 @dataclass
 class CrossTradeResult:
     """Result of a cross-exchange trade execution."""

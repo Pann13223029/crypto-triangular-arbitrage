@@ -356,6 +356,7 @@ async def run_cross_exchange_simulation(args):
     from cross_exchange.risk_manager import CrossExchangeRiskManager
     from cross_exchange.balance_tracker import BalanceTracker
     from cross_exchange.models import CrossExchangeOpportunity
+    from rebalancing.manager import RebalanceManager
     from data.db import Database
     from data.price_cache import PriceCache
     from exchange.binance_rest import BinanceREST
@@ -397,9 +398,12 @@ async def run_cross_exchange_simulation(args):
         cx_config=config.cross_exchange,
     )
 
-    # 5. Balance tracker
+    # 5. Balance tracker + Rebalancer
     balance_tracker = BalanceTracker(multi_sim.exchanges)
     await balance_tracker.refresh_all()
+
+    rebalancer = RebalanceManager(balance_tracker, config.rebalance)
+    rebalancer.set_targets(config.multi_sim.exchange_ids)
 
     # 6. Database
     db = Database(config.database)
@@ -491,21 +495,45 @@ async def run_cross_exchange_simulation(args):
 
     watchdog_task = asyncio.create_task(duration_watchdog()) if args.duration > 0 else None
 
-    # 10. Periodic stats
-    async def stats_loop():
+    # 10. Periodic stats + rebalancing check
+    async def stats_and_rebalance_loop():
+        rebalance_counter = 0
         while True:
             await asyncio.sleep(10)
+            rebalance_counter += 1
+
             s = cx_scanner.stats()
             e = cx_executor.stats()
             r = cx_risk.stats()
+            rb = rebalancer.stats()
             logger.info(
                 "Cross | Opps: %d | Exec: %d | P&L: $%.4f | "
-                "Hedges: %d | Killed: %s",
+                "Hedges: %d | Rebal: %d | Killed: %s",
                 s["total_opportunities"], e["total_executions"],
-                e["net_pnl"], e["emergency_hedges"], r["killed"],
+                e["net_pnl"], e["emergency_hedges"],
+                rb["total_transfers"], r["killed"],
             )
 
-    stats_task = asyncio.create_task(stats_loop())
+            # Check rebalancing every N intervals (config.rebalance.check_interval_sec)
+            check_every = max(1, int(config.rebalance.check_interval_sec / 10))
+            if config.rebalance.enabled and rebalance_counter % check_every == 0:
+                await balance_tracker.refresh_all()
+                decision = rebalancer.check_rebalance_needed()
+                if decision is not None:
+                    completed = await rebalancer.execute_rebalance(decision)
+                    for transfer in completed:
+                        await db.log_transfer(transfer)
+
+                    # Log deviation report
+                    report = rebalancer.get_deviation_report()
+                    for ex_id, info in report.items():
+                        logger.info(
+                            "  Balance: %s USDT $%.0f (target $%.0f, dev %s)",
+                            ex_id, info["current_usdt"],
+                            info["target_usdt"], info["deviation"],
+                        )
+
+    stats_task = asyncio.create_task(stats_and_rebalance_loop())
 
     symbols_to_subscribe = set(config.cross_exchange.symbols)
     logger.info("Subscribing to %d symbols...", len(symbols_to_subscribe))
@@ -534,6 +562,8 @@ async def run_cross_exchange_simulation(args):
         e = cx_executor.stats()
         r = cx_risk.stats()
         b = balance_tracker.stats()
+        rb = rebalancer.stats()
+        dev = rebalancer.get_deviation_report()
 
         print("\n" + "=" * 60)
         print("  CROSS-EXCHANGE SESSION SUMMARY")
@@ -560,6 +590,11 @@ async def run_cross_exchange_simulation(args):
         total_fees = sum(tr.total_fees for tr in trade_results)
         print(f"    Total fees:        ${total_fees:>11.4f}")
 
+        print(f"\n  REBALANCING")
+        print(f"    Transfers done:     {rb['total_transfers']:>10}")
+        print(f"    Amount moved:      ${rb['total_transferred_usd']:>11.2f}")
+        print(f"    Transfer fees:     ${rb['total_transfer_fees']:>11.2f}")
+
         print(f"\n  RISK")
         print(f"    Daily P&L:        {'+'if r['daily_pnl']>=0 else ''}${r['daily_pnl']:>11.4f}")
         print(f"    Consec. losses:     {r['consecutive_losses']:>10}")
@@ -568,9 +603,15 @@ async def run_cross_exchange_simulation(args):
         print(f"    Approved/Rejected:  {r['approved']}/{r['rejected']}")
 
         print(f"\n  BALANCES PER EXCHANGE")
-        for ex_id, bals in b.get("per_exchange", {}).items():
-            parts = [f"{k}: {v:.4f}" for k, v in sorted(bals.items()) if v > 0.0001]
-            print(f"    {ex_id:<14}  {', '.join(parts)}")
+        for ex_id in sorted(dev.keys()):
+            info = dev[ex_id]
+            bals = b.get("per_exchange", {}).get(ex_id, {})
+            usdt = bals.get("USDT", 0)
+            flag = " ⚠" if info["needs_rebalance"] else ""
+            print(
+                f"    {ex_id:<14}  USDT: ${usdt:>10.2f}  "
+                f"(target: ${info['target_usdt']:>.0f}, dev: {info['deviation']}){flag}"
+            )
 
         print(f"\n  WEBSOCKET")
         print(f"    Messages received:  {ws.stats()['total_messages']:>10,}")
