@@ -49,6 +49,11 @@ def parse_args():
         help="Enable cross-exchange arbitrage simulation",
     )
     parser.add_argument(
+        "--live-scan",
+        action="store_true",
+        help="Live cross-exchange scan with real prices from 3 exchanges",
+    )
+    parser.add_argument(
         "--dashboard",
         action="store_true",
         help="Enable real-time CLI dashboard",
@@ -674,20 +679,220 @@ async def run_cross_exchange_simulation(args):
         print("\n" + "=" * 60)
 
 
+async def run_live_cross_exchange(args):
+    """Live cross-exchange scanning with REAL prices from Binance + Bybit + OKX."""
+    from config.settings import Config, FeeSchedule
+    from cross_exchange.scanner import CrossExchangeScanner
+    from cross_exchange.models import CrossExchangeOpportunity
+    from monitoring.metrics import PipelineMetrics, TradeMetric
+    from data.db import Database
+    from exchange.binance_ws import BinanceWebSocket
+    from exchange.bybit_ws import BybitWebSocket
+    from exchange.okx_ws import OKXWebSocket
+
+    logger = logging.getLogger("main.live")
+    config = Config()
+    symbols = config.cross_exchange.symbols
+
+    logger.info("=== LIVE Cross-Exchange Scanner ===")
+    logger.info("Exchanges: Binance + Bybit + OKX")
+    logger.info("Symbols: %s", ", ".join(symbols))
+    logger.info("Mode: %s", "DRY-RUN (scan only)" if args.dry_run else "LIVE EXECUTION")
+
+    # Fee schedules per exchange
+    fee_schedules = {
+        "binance": FeeSchedule("binance", taker_fee=0.00075, maker_fee=0.00075),
+        "bybit": FeeSchedule("bybit", taker_fee=0.001, maker_fee=0.001),
+        "okx": FeeSchedule("okx", taker_fee=0.001, maker_fee=0.0008),
+    }
+
+    # Scanner
+    cx_scanner = CrossExchangeScanner(
+        symbols=symbols,
+        fee_schedules=fee_schedules,
+        min_net_spread=config.cross_exchange.min_net_spread,
+        staleness_ms=config.cross_exchange.staleness_threshold_ms,
+        dedup_cooldown_ms=config.cross_exchange.dedup_cooldown_ms,
+        max_spread_anomaly=config.cross_exchange.max_spread_anomaly,
+    )
+
+    metrics = PipelineMetrics()
+
+    # Database
+    db = Database(config.database)
+    await db.connect()
+    session_id = await db.start_session("live_cross_exchange")
+
+    # Track all opportunities
+    all_opportunities: list[CrossExchangeOpportunity] = []
+
+    # WebSocket callbacks — one per exchange, all feed into same scanner
+    def make_handler(ex_id):
+        def handler(ticker):
+            if ticker.symbol not in cx_scanner.books:
+                return
+            opp = cx_scanner.update(ex_id, ticker)
+            if opp is not None:
+                all_opportunities.append(opp)
+                net_flag = "PROFIT" if opp.net_spread > 0 else "loss"
+                logger.info(
+                    "OPP %s %s BUY %s @ %.6f → SELL %s @ %.6f "
+                    "(gross: %.4f%%, net: %+.4f%%) [%s]",
+                    opp.symbol, net_flag,
+                    opp.buy_exchange, opp.buy_price,
+                    opp.sell_exchange, opp.sell_price,
+                    opp.gross_spread * 100, opp.net_spread * 100,
+                    net_flag,
+                )
+                tm = TradeMetric(
+                    opportunity_detected_ms=opp.timestamp_ms,
+                    symbol=opp.symbol,
+                    net_pnl=opp.net_spread,
+                    aborted=True,  # Scan-only mode
+                )
+                metrics.record(tm)
+        return handler
+
+    # Create 3 WebSocket connections
+    bn_ws = BinanceWebSocket(
+        config=config.websocket,
+        on_ticker=make_handler("binance"),
+        use_book_ticker=True,
+    )
+    by_ws = BybitWebSocket(on_ticker=make_handler("bybit"))
+    ok_ws = OKXWebSocket(on_ticker=make_handler("okx"))
+
+    sym_set = set(symbols)
+
+    # Duration watchdog
+    async def duration_watchdog():
+        if args.duration > 0:
+            await asyncio.sleep(args.duration)
+            logger.info("Duration limit reached (%ds)", args.duration)
+            await bn_ws.stop()
+            await by_ws.stop()
+            await ok_ws.stop()
+
+    # Periodic stats
+    async def stats_loop():
+        while True:
+            await asyncio.sleep(10)
+            s = cx_scanner.stats()
+            profitable = [o for o in all_opportunities if o.net_spread > 0]
+            logger.info(
+                "Live | Updates: %d | Opps: %d | Profitable: %d | "
+                "BN: %d msg | BY: %d msg | OKX: %d msg",
+                s["total_updates"], s["total_opportunities"],
+                len(profitable),
+                bn_ws.total_messages, by_ws.total_messages, ok_ws.total_messages,
+            )
+
+    logger.info("Connecting to 3 exchanges...")
+
+    await bn_ws.connect(sym_set)
+    await by_ws.connect(sym_set)
+    await ok_ws.connect(sym_set)
+
+    logger.info("All 3 exchanges connected. Scanning...")
+
+    watchdog_task = asyncio.create_task(duration_watchdog()) if args.duration > 0 else None
+    stats_task = asyncio.create_task(stats_loop())
+
+    try:
+        await asyncio.gather(
+            bn_ws.listen(),
+            by_ws.listen(),
+            ok_ws.listen(),
+        )
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        pass
+    finally:
+        logger.info("Shutting down...")
+        stats_task.cancel()
+        if watchdog_task:
+            watchdog_task.cancel()
+        await bn_ws.stop()
+        await by_ws.stop()
+        await ok_ws.stop()
+
+        # Log opportunities to DB
+        for opp in all_opportunities:
+            await db.log_cross_opportunity(opp)
+        await db.end_session()
+        await db.close()
+
+        # Summary
+        s = cx_scanner.stats()
+        profitable = [o for o in all_opportunities if o.net_spread > 0]
+        unprofitable = [o for o in all_opportunities if o.net_spread <= 0]
+
+        print("\n" + "=" * 70)
+        print("  LIVE CROSS-EXCHANGE SCAN SUMMARY")
+        print("=" * 70)
+
+        print(f"\n  EXCHANGES")
+        print(f"    Binance msgs:       {bn_ws.total_messages:>12,}")
+        print(f"    Bybit msgs:         {by_ws.total_messages:>12,}")
+        print(f"    OKX msgs:           {ok_ws.total_messages:>12,}")
+        print(f"    Total:              {bn_ws.total_messages + by_ws.total_messages + ok_ws.total_messages:>12,}")
+
+        print(f"\n  SCANNER")
+        print(f"    Symbols tracked:    {s['tracked_symbols']:>12}")
+        print(f"    Total updates:      {s['total_updates']:>12,}")
+        print(f"    Opportunities:      {s['total_opportunities']:>12}")
+        print(f"    Deduped:            {s['total_deduped']:>12}")
+
+        print(f"\n  OPPORTUNITIES")
+        print(f"    Total found:        {len(all_opportunities):>12}")
+        print(f"    Profitable (net>0): {len(profitable):>12}")
+        print(f"    Unprofitable:       {len(unprofitable):>12}")
+
+        if profitable:
+            nets = [o.net_spread for o in profitable]
+            print(f"    Best net spread:    {max(nets):>11.4%}")
+            print(f"    Avg net spread:     {sum(nets)/len(nets):>11.4%}")
+
+            # Group by symbol
+            by_symbol: dict[str, list] = {}
+            for o in profitable:
+                by_symbol.setdefault(o.symbol, []).append(o)
+
+            print(f"\n  PROFITABLE BY SYMBOL")
+            for sym in sorted(by_symbol, key=lambda s: -len(by_symbol[s])):
+                opps = by_symbol[sym]
+                avg_net = sum(o.net_spread for o in opps) / len(opps)
+                best_net = max(o.net_spread for o in opps)
+                routes = set(f"{o.buy_exchange}→{o.sell_exchange}" for o in opps)
+                print(
+                    f"    {sym:<14} {len(opps):>3}x  "
+                    f"avg: {avg_net:+.4%}  best: {best_net:+.4%}  "
+                    f"routes: {', '.join(routes)}"
+                )
+
+        if all_opportunities:
+            print(f"\n  LAST 10 OPPORTUNITIES")
+            for o in all_opportunities[-10:]:
+                flag = "+" if o.net_spread > 0 else " "
+                print(
+                    f"    {o.symbol:<14} BUY {o.buy_exchange:<10} "
+                    f"SELL {o.sell_exchange:<10} "
+                    f"net: {flag}{o.net_spread:.4%}"
+                )
+
+        print("\n" + "=" * 70)
+
+
 async def main():
     args = parse_args()
     setup_logging(args.log_level, dashboard=args.dashboard)
 
-    if args.mode == "live":
-        key = os.getenv("BINANCE_API_KEY", "")
-        if not key:
-            print("ERROR: BINANCE_API_KEY not set in .env")
-            sys.exit(1)
-        print("Live mode not yet implemented — use simulation")
-        sys.exit(1)
-
-    if args.cross_exchange:
+    if args.live_scan:
+        await run_live_cross_exchange(args)
+    elif args.cross_exchange:
         await run_cross_exchange_simulation(args)
+    elif args.mode == "live":
+        print("Live triangular mode not yet implemented — use --live-scan for cross-exchange")
+        sys.exit(1)
     else:
         await run_simulation(args)
 
