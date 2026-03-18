@@ -146,7 +146,7 @@ class Opportunity:
     triangle: Triangle
     direction: Direction
     theoretical_profit: float  # Before slippage
-    executable_profit: float | None  # After order book simulation
+    executable_profit: float | None = None  # After order book simulation
     prices: dict[str, Ticker] = field(default_factory=dict)
     timestamp_ms: int = field(default_factory=lambda: time_ns() // 1_000_000)
     executed: bool = False
