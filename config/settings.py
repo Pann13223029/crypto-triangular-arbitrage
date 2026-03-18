@@ -110,10 +110,17 @@ class CrossExchangeConfig:
     dedup_cooldown_ms: int = 5000  # 5 seconds (bookTicker fires much more frequently)
     symbols: list[str] = field(
         default_factory=lambda: [
-            "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
-            "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT",
+            # Tier 1: Mid-cap with wide cross-exchange spreads (0.2-1%+)
+            "BARDUSDT", "ZAMAUSDT", "SAHARAUSDT", "ARKMUSDT", "CFGUSDT",
+            "GUSDT", "WIFUSDT", "THETAUSDT", "TNSRUSDT",
+            # Tier 2: Decent spreads (0.1-0.2%)
+            "WOOUSDT", "MINAUSDT", "ARUSDT", "YFIUSDT", "CITYUSDT",
+            "PYTHUSDT", "NOTUSDT", "AGLDUSDT", "BICOUSDT",
+            # Tier 3: Liquid pairs for monitoring (tight spreads)
+            "BTCUSDT", "ETHUSDT", "SOLUSDT",
         ]
     )
+    max_spread_anomaly: float = 0.05  # 5% — reject spreads above this (likely stale)
 
 
 @dataclass

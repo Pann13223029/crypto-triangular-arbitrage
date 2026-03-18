@@ -23,11 +23,13 @@ class CrossExchangeBook:
         fee_schedules: dict[str, FeeSchedule],
         staleness_ms: int = 1000,
         min_net_spread: float = 0.0005,
+        max_spread_anomaly: float = 0.05,
     ):
         self.symbol = symbol
         self.fee_schedules = fee_schedules
         self.staleness_ms = staleness_ms
         self.min_net_spread = min_net_spread
+        self.max_spread_anomaly = max_spread_anomaly
 
         # exchange_id -> ExchangeQuote
         self.quotes: dict[str, ExchangeQuote] = {}
@@ -60,6 +62,14 @@ class CrossExchangeBook:
 
         # Calculate spreads
         gross_spread = (best_sell.bid - best_buy.ask) / best_buy.ask
+
+        # Anomaly filter: reject impossibly wide spreads (likely stale/delisted)
+        if gross_spread > self.max_spread_anomaly:
+            logger.debug(
+                "Anomaly: %s spread %.2f%% > %.2f%% max — likely stale price",
+                self.symbol, gross_spread * 100, self.max_spread_anomaly * 100,
+            )
+            return None
 
         buy_fee = self.fee_schedules.get(
             best_buy.exchange_id, FeeSchedule()

@@ -32,6 +32,7 @@ class CrossExchangeScanner:
         dedup_cooldown_ms: int = 3000,
         balance_tracker: BalanceTracker | None = None,
         min_trade_usd: float = 10.0,
+        max_spread_anomaly: float = 0.05,
     ):
         self.fee_schedules = fee_schedules
         self.min_net_spread = min_net_spread
@@ -46,6 +47,7 @@ class CrossExchangeScanner:
                 fee_schedules=fee_schedules,
                 staleness_ms=staleness_ms,
                 min_net_spread=min_net_spread,
+                max_spread_anomaly=max_spread_anomaly,
             )
             for symbol in symbols
         }
