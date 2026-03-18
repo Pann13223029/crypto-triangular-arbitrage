@@ -349,10 +349,13 @@ async def run_simulation(args):
 
 
 async def run_cross_exchange_simulation(args):
-    """Cross-exchange simulation — real base prices, simulated divergence."""
+    """Cross-exchange simulation — real base prices, simulated divergence, live execution."""
     from config.settings import Config
     from cross_exchange.scanner import CrossExchangeScanner
+    from cross_exchange.executor import CrossExchangeExecutor
+    from cross_exchange.risk_manager import CrossExchangeRiskManager
     from cross_exchange.balance_tracker import BalanceTracker
+    from cross_exchange.models import CrossExchangeOpportunity
     from data.db import Database
     from data.price_cache import PriceCache
     from exchange.binance_rest import BinanceREST
@@ -386,50 +389,100 @@ async def run_cross_exchange_simulation(args):
         dedup_cooldown_ms=config.cross_exchange.dedup_cooldown_ms,
     )
 
-    # 4. Balance tracker
+    # 4. Executor + Risk Manager
+    cx_risk = CrossExchangeRiskManager(config.trading, config.cross_exchange)
+    cx_executor = CrossExchangeExecutor(
+        exchanges=multi_sim.exchanges,
+        trading_config=config.trading,
+        cx_config=config.cross_exchange,
+    )
+
+    # 5. Balance tracker
     balance_tracker = BalanceTracker(multi_sim.exchanges)
     await balance_tracker.refresh_all()
 
-    # 5. Database
+    # 6. Database
     db = Database(config.database)
     await db.connect()
     session_id = await db.start_session("cross_exchange_sim")
 
-    # 6. Price cache + WebSocket
+    # 7. Opportunity queue for async execution
+    opp_queue: asyncio.Queue = asyncio.Queue()
     price_cache = PriceCache()
-    cx_opportunities: list[dict] = []
 
     # WebSocket callback — inject base price, generate divergent, scan
     def on_ticker(ticker):
         price_cache.update_ticker(ticker)
 
-        # Only process symbols we're tracking
         if ticker.symbol not in cx_scanner.books:
             return
 
-        # Generate divergent prices
         divergent = multi_sim.inject_base_ticker(ticker)
 
-        # Feed each exchange's price into the scanner
         for ex_id, ex_ticker in divergent.items():
             opp = cx_scanner.update(ex_id, ex_ticker)
             if opp is not None:
-                cx_opportunities.append({
-                    "symbol": opp.symbol,
-                    "buy": opp.buy_exchange,
-                    "sell": opp.sell_exchange,
-                    "gross": opp.gross_spread,
-                    "net": opp.net_spread,
-                    "buy_price": opp.buy_price,
-                    "sell_price": opp.sell_price,
-                })
+                try:
+                    opp_queue.put_nowait(opp)
+                except asyncio.QueueFull:
+                    pass
 
-    ws = BinanceWebSocket(
-        config=config.websocket,
-        on_ticker=on_ticker,
-    )
+    ws = BinanceWebSocket(config=config.websocket, on_ticker=on_ticker)
 
-    # 7. Duration watchdog
+    # 8. Opportunity processor — executes trades
+    trade_results = []
+
+    async def process_opportunities():
+        while True:
+            opp = await opp_queue.get()
+            if opp is None:
+                break
+
+            # Risk check
+            approved, reason = cx_risk.check(opp)
+            if not approved:
+                opp.skip_reason = reason
+                await db.log_cross_opportunity(opp)
+                continue
+
+            if args.dry_run:
+                logger.info(
+                    "DRY-RUN: %s BUY %s SELL %s (net: %.4f%%)",
+                    opp.symbol, opp.buy_exchange, opp.sell_exchange,
+                    opp.net_spread * 100,
+                )
+                opp.skip_reason = "dry-run"
+                await db.log_cross_opportunity(opp)
+                continue
+
+            # Execute
+            cx_risk.on_arb_start()
+            opp.executed = True
+            opp_id = await db.log_cross_opportunity(opp)
+
+            result = await cx_executor.execute(opp)
+            trade_results.append(result)
+
+            # Log trades
+            if result.buy_order:
+                await db.log_cross_trade(opp_id, opp.buy_exchange, result.buy_order)
+            if result.sell_order:
+                await db.log_cross_trade(opp_id, opp.sell_exchange, result.sell_order)
+            if result.hedge_order:
+                await db.log_cross_trade(opp_id, "hedge", result.hedge_order)
+
+            cx_risk.record_trade_result(
+                result.net_pnl,
+                had_emergency_hedge=result.hedge_order is not None,
+            )
+            cx_risk.on_arb_end()
+
+            # Refresh balances after trade
+            await balance_tracker.refresh_all()
+
+    processor_task = asyncio.create_task(process_opportunities())
+
+    # 9. Duration watchdog
     async def duration_watchdog():
         if args.duration > 0:
             await asyncio.sleep(args.duration)
@@ -438,22 +491,24 @@ async def run_cross_exchange_simulation(args):
 
     watchdog_task = asyncio.create_task(duration_watchdog()) if args.duration > 0 else None
 
-    # 8. Periodic stats
+    # 10. Periodic stats
     async def stats_loop():
         while True:
             await asyncio.sleep(10)
             s = cx_scanner.stats()
+            e = cx_executor.stats()
+            r = cx_risk.stats()
             logger.info(
-                "Cross-exchange | Updates: %d | Opportunities: %d | Deduped: %d | Symbols: %d",
-                s["total_updates"], s["total_opportunities"],
-                s["total_deduped"], s["tracked_symbols"],
+                "Cross | Opps: %d | Exec: %d | P&L: $%.4f | "
+                "Hedges: %d | Killed: %s",
+                s["total_opportunities"], e["total_executions"],
+                e["net_pnl"], e["emergency_hedges"], r["killed"],
             )
 
     stats_task = asyncio.create_task(stats_loop())
 
-    # Subscribe only to cross-exchange symbols
     symbols_to_subscribe = set(config.cross_exchange.symbols)
-    logger.info("Subscribing to %d symbols for cross-exchange scanning...", len(symbols_to_subscribe))
+    logger.info("Subscribing to %d symbols...", len(symbols_to_subscribe))
 
     try:
         await ws.listen_with_reconnect(symbols_to_subscribe)
@@ -462,63 +517,63 @@ async def run_cross_exchange_simulation(args):
     finally:
         logger.info("Shutting down...")
         stats_task.cancel()
+        await opp_queue.put(None)
+        await processor_task
         if watchdog_task:
             watchdog_task.cancel()
         await ws.stop()
-
-        # Log opportunities to DB
-        for opp_data in cx_opportunities:
-            from cross_exchange.models import CrossExchangeOpportunity
-            opp = CrossExchangeOpportunity(
-                symbol=opp_data["symbol"],
-                buy_exchange=opp_data["buy"],
-                sell_exchange=opp_data["sell"],
-                buy_price=opp_data["buy_price"],
-                sell_price=opp_data["sell_price"],
-                gross_spread=opp_data["gross"],
-                net_spread=opp_data["net"],
-            )
-            await db.log_cross_opportunity(opp)
-
-        await db.end_session()
+        await db.end_session(
+            gross_pnl=cx_executor.total_profit - cx_executor.total_loss,
+            net_pnl=cx_executor.total_profit - cx_executor.total_loss,
+            fees_paid=sum(r.total_fees for r in trade_results),
+        )
         await db.close()
 
         # Summary
         s = cx_scanner.stats()
+        e = cx_executor.stats()
+        r = cx_risk.stats()
         b = balance_tracker.stats()
 
         print("\n" + "=" * 60)
         print("  CROSS-EXCHANGE SESSION SUMMARY")
         print("=" * 60)
 
-        print(f"\n  Exchanges:          {', '.join(config.multi_sim.exchange_ids)}")
-        print(f"  Symbols tracked:    {s['tracked_symbols']}")
-        print(f"  Total updates:      {s['total_updates']:,}")
-        print(f"  Opportunities:      {s['total_opportunities']}")
-        print(f"  Deduped:            {s['total_deduped']}")
-        print(f"  WebSocket msgs:     {ws.stats()['total_messages']:,}")
+        print(f"\n  SCANNER")
+        print(f"    Symbols tracked:    {s['tracked_symbols']:>10}")
+        print(f"    Total updates:      {s['total_updates']:>10,}")
+        print(f"    Opportunities:      {s['total_opportunities']:>10}")
+        print(f"    Deduped:            {s['total_deduped']:>10}")
 
-        if cx_opportunities:
-            net_spreads = [o["net"] for o in cx_opportunities]
-            print(f"\n  OPPORTUNITY STATS")
-            print(f"    Best net spread:  {max(net_spreads):.4%}")
-            print(f"    Avg net spread:   {sum(net_spreads)/len(net_spreads):.4%}")
-            print(f"    Total found:      {len(cx_opportunities)}")
+        print(f"\n  EXECUTION")
+        print(f"    Total executions:   {e['total_executions']:>10}")
+        print(f"    Both filled:        {e['both_filled']:>10}")
+        print(f"    Aborts:             {e['aborts']:>10}")
+        print(f"    Emergency hedges:   {e['emergency_hedges']:>10}")
+        print(f"    Win rate:           {e['win_rate']:>10}")
 
-            print(f"\n  RECENT OPPORTUNITIES")
-            for opp in cx_opportunities[-10:]:
-                print(
-                    f"    {opp['symbol']:<10} BUY {opp['buy']:<14} "
-                    f"SELL {opp['sell']:<14} "
-                    f"net: {opp['net']:.4%}"
-                )
-        else:
-            print("\n  No cross-exchange opportunities found.")
+        print(f"\n  P&L (USD)")
+        pnl = e['net_pnl']
+        print(f"    Net P&L:          {'+'if pnl>=0 else ''}${pnl:>11.4f}")
+        print(f"    Gross profit:      ${e['total_profit']:>11.4f}")
+        print(f"    Gross loss:       -${e['total_loss']:>11.4f}")
+        total_fees = sum(tr.total_fees for tr in trade_results)
+        print(f"    Total fees:        ${total_fees:>11.4f}")
+
+        print(f"\n  RISK")
+        print(f"    Daily P&L:        {'+'if r['daily_pnl']>=0 else ''}${r['daily_pnl']:>11.4f}")
+        print(f"    Consec. losses:     {r['consecutive_losses']:>10}")
+        print(f"    Emergency hedges:   {r['emergency_hedges']:>10}")
+        print(f"    Kill switch:        {'ACTIVE — '+r['kill_reason'] if r['killed'] else 'OFF':>10}")
+        print(f"    Approved/Rejected:  {r['approved']}/{r['rejected']}")
 
         print(f"\n  BALANCES PER EXCHANGE")
         for ex_id, bals in b.get("per_exchange", {}).items():
-            usdt = bals.get("USDT", 0)
-            print(f"    {ex_id:<14}  USDT: {usdt:>12.2f}")
+            parts = [f"{k}: {v:.4f}" for k, v in sorted(bals.items()) if v > 0.0001]
+            print(f"    {ex_id:<14}  {', '.join(parts)}")
+
+        print(f"\n  WEBSOCKET")
+        print(f"    Messages received:  {ws.stats()['total_messages']:>10,}")
 
         print("\n" + "=" * 60)
 
