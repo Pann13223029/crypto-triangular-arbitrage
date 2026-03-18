@@ -26,7 +26,8 @@ def make_exchange(ex_id: str, usdt: float = 10000.0, btc: float = 0.15) -> Simul
 
 
 def make_opp(symbol="BTCUSDT", buy_ex="ex_a", sell_ex="ex_b",
-             buy_price=67000.0, sell_price=67200.0) -> CrossExchangeOpportunity:
+             buy_price=67000.0, sell_price=68000.0) -> CrossExchangeOpportunity:
+    """Default ~1.5% spread to satisfy 1% min_net_spread."""
     gross = (sell_price - buy_price) / buy_price
     return CrossExchangeOpportunity(
         symbol=symbol,

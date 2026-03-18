@@ -195,7 +195,7 @@ class SimulatedExchange(ExchangeBase):
             symbol=symbol,
             side=side,
             quantity=quantity,
-            expected_price=base_price,
+            expected_price=price if is_limit else fill_price,
             actual_price=fill_price,
             fee=fee,
             status=OrderStatus.FILLED,

@@ -12,11 +12,11 @@ class TradingConfig:
     """Risk and trading parameters."""
 
     min_profit_threshold: float = 0.0001  # 0.01% minimum net profit
-    max_position_size_usd: float = 500.0  # Max USD per triangle
-    daily_loss_limit_usd: float = 50.0  # Kill switch threshold
+    max_position_size_usd: float = 10.0  # Conservative: $10 per trade for live launch
+    daily_loss_limit_usd: float = 5.0  # Kill switch: $5 loss stops everything
     max_open_triangles: int = 1  # One at a time (v1)
     slippage_tolerance: float = 0.0005  # 0.05%
-    cooldown_after_loss_sec: float = 60.0  # Pause after loss
+    cooldown_after_loss_sec: float = 30.0  # 30s pause after loss
     max_consecutive_losses: int = 3  # Halt after N losses
 
 
@@ -103,9 +103,9 @@ class CrossExchangeConfig:
     """Cross-exchange arbitrage settings."""
 
     enabled: bool = True
-    min_net_spread: float = 0.0005  # 0.05% minimum after fees
-    max_position_size_usd: float = 500.0
-    staleness_threshold_ms: int = 1000  # 1 second
+    min_net_spread: float = 0.01  # 1.0% minimum — panel recommendation for BARD
+    max_position_size_usd: float = 10.0  # Match trading config for launch
+    staleness_threshold_ms: int = 3000  # 3 seconds — panel recommendation for micro-cap
     max_concurrent_arbs: int = 3
     dedup_cooldown_ms: int = 5000  # 5 seconds (bookTicker fires much more frequently)
     symbols: list[str] = field(
