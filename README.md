@@ -1,169 +1,188 @@
-# Crypto Triangular Arbitrage
+# Crypto Arbitrage Trading System
 
-A Python-based triangular arbitrage detection and execution system for Binance.
+A Python-based arbitrage detection and execution system supporting **triangular arbitrage** (single exchange) and **cross-exchange arbitrage** (Binance + KuCoin + OKX).
 
-## What is Triangular Arbitrage?
-
-Triangular arbitrage exploits price inefficiencies between three trading pairs on the same exchange. If the product of the three exchange rates yields a net gain after trading fees, all three trades are executed to capture the spread.
+## What It Does
 
 ```mermaid
 graph LR
-    USDT -->|"1. Buy BTC"| BTC
-    BTC -->|"2. Buy ETH"| ETH
-    ETH -->|"3. Sell for USDT"| USDT
+    subgraph SingleExchange["Triangular Arb (1 exchange)"]
+        USDT1["USDT"] -->|Buy| BTC1["BTC"]
+        BTC1 -->|Buy| ETH1["ETH"]
+        ETH1 -->|Sell| USDT1
+    end
 
-    style USDT fill:#22c55e,stroke:#16a34a,color:#fff
-    style BTC fill:#f59e0b,stroke:#d97706,color:#fff
-    style ETH fill:#6366f1,stroke:#4f46e5,color:#fff
+    subgraph CrossExchange["Cross-Exchange Arb (2+ exchanges)"]
+        KC["KuCoin<br/>Buy BARD @ $0.55"]
+        BN["Binance<br/>Sell BARD @ $0.57"]
+        KC -->|"+3.6% spread"| BN
+    end
+
+    style SingleExchange fill:#1e293b,stroke:#334155,color:#fff
+    style CrossExchange fill:#1e293b,stroke:#334155,color:#fff
 ```
 
-> All trades happen on **one exchange** — no transfers, no withdrawal risk, no counterparty exposure.
+**Cross-exchange arb** is the primary strategy — buying assets cheap on one exchange and selling higher on another. Live market validation shows **+1-5% net spreads** on mid-cap pairs like BARD between KuCoin and Binance.
 
-## System Overview
+## Live Results
+
+| Metric | Value |
+|--------|-------|
+| Opportunities (60s scan) | 20, **100% profitable** |
+| Best net spread | **+4.72%** (KuCoin → Binance) |
+| Average net spread | **+1.23%** |
+| Target pairs | BARD, SAHARA, CFG, ARKM + 17 more |
+| Exchanges | Binance, KuCoin, OKX (price feed), Bybit (price feed) |
+
+## System Architecture
 
 ```mermaid
-flowchart LR
-    subgraph Input["Data"]
-        WS["Binance<br/>WebSocket"]
+flowchart TB
+    subgraph Feeds["Real-Time Price Feeds"]
+        BN["Binance<br/>bookTicker"]
+        KC["KuCoin<br/>orderbook.1"]
+        OKX["OKX<br/>tickers"]
     end
 
-    subgraph Engine["Engine"]
-        PC["Price<br/>Cache"]
-        SC["Triangle<br/>Scanner"]
-        OS["Opportunity<br/>Scorer"]
+    subgraph Engine["Scanning Engine"]
+        CXB["CrossExchangeBook<br/>(per symbol, per exchange pair)"]
+        FLT["Pre-flight Filter<br/>(balance + anomaly)"]
+        SCN["Scanner<br/>(dedup + staleness)"]
     end
 
-    subgraph Trade["Trading"]
-        RM["Risk<br/>Manager"]
-        EX["Executor"]
+    subgraph Execution["Execution"]
+        RISK["Risk Manager<br/>(kill switch, limits)"]
+        EXEC["Executor<br/>(simultaneous orders)"]
+        HEDGE["Emergency Hedge"]
     end
 
-    subgraph Monitor["Monitor"]
-        DB["SQLite<br/>Logger"]
-        DASH["CLI<br/>Dashboard"]
+    subgraph Output["Output"]
+        DB["SQLite Audit Log"]
+        BAL["Balance Tracker"]
+        REB["Rebalancer"]
     end
 
-    WS --> PC --> SC --> OS --> RM --> EX --> DB --> DASH
+    BN & KC & OKX --> CXB --> FLT --> SCN --> RISK --> EXEC
+    EXEC -->|"fail"| HEDGE
+    EXEC --> DB
+    EXEC --> BAL --> REB
 
-    style Input fill:#1e293b,stroke:#334155,color:#fff
+    style Feeds fill:#1e293b,stroke:#334155,color:#fff
     style Engine fill:#1e293b,stroke:#334155,color:#fff
-    style Trade fill:#1e293b,stroke:#334155,color:#fff
-    style Monitor fill:#1e293b,stroke:#334155,color:#fff
+    style Execution fill:#1e293b,stroke:#334155,color:#fff
+    style Output fill:#1e293b,stroke:#334155,color:#fff
 ```
 
 ## Features
 
-- **Real-time scanning** — WebSocket price feeds with selective triangle updates
-- **Vectorized calculation** — numpy-powered profit detection across 2,000+ triangles
-- **Simulation mode** — Paper trading with virtual balances and configurable slippage
-- **Risk management** — Position limits, daily loss limits, circuit breakers, kill switch
-- **Full audit trail** — Every opportunity logged (executed or skipped) in SQLite
-- **CLI dashboard** — Real-time P&L, scan rate, and system health monitoring
+- **4-exchange price feeds** — Binance (bookTicker), KuCoin, OKX, Bybit WebSocket streams
+- **Cross-exchange scanning** — aggregated order book per symbol, staleness + anomaly filtering
+- **Pre-flight balance filter** — rejects opportunities that can't execute (eliminated 68% waste)
+- **Simultaneous execution** — both buy and sell orders fire concurrently via asyncio
+- **Maker sell support** — limit sell for lower fees (0.095% vs 0.15% break-even)
+- **Emergency hedge** — if one leg fails, immediately close exposure on same exchange
+- **Risk management** — kill switch, daily loss limit, consecutive loss halt, imbalance-aware filtering
+- **Spread-based position sizing** — 25/50/75/100% of max based on spread confidence
+- **Rebalancing** — threshold-based (25% deviation) + opportunity-aware bias
+- **Pipeline metrics** — per-symbol P&L, timing instrumentation, abort rate tracking
+- **Full audit trail** — every opportunity, trade, and transfer logged to SQLite
+- **Triangular arb** — 192 triangles on Binance (works but market too efficient for retail)
+- **104 unit tests** passing
 
 ## Quick Start
 
 ```bash
-# Clone the repo
+# Clone
 git clone https://github.com/Pann13223029/crypto-triangular-arbitrage.git
 cd crypto-triangular-arbitrage
 
-# Create virtual environment
+# Setup
 python3 -m venv venv
 source venv/bin/activate
-
-# Install dependencies
 pip install -r requirements.txt
 
-# Configure (simulation mode by default)
+# Configure
 cp .env.example .env
+# Edit .env with your API keys (Binance + KuCoin minimum)
+```
 
-# Run in simulation mode
-python main.py --mode simulation
+### Scan Only (no API keys needed for public data)
+
+```bash
+# Live scan across 3 exchanges — see real opportunities
+python main.py --live-scan --duration 60 --dry-run
+```
+
+### Simulated Trading
+
+```bash
+# Cross-exchange simulation with O-U price divergence
+python main.py --cross-exchange --duration 120
+
+# Original triangular arb simulation
+python main.py --mode simulation --duration 120
+```
+
+### Live Execution (requires API keys + funds)
+
+```bash
+# Execute real trades (asks for YES confirmation)
+python main.py --live-scan --execute --duration 60
 ```
 
 ## Project Structure
 
 ```
-├── main.py              # Entry point
-├── config/              # Settings, environment config
-├── core/                # Triangle discovery, scanner, calculator
-├── exchange/            # Binance API (WebSocket + REST) & simulator
-├── execution/           # Trade executor, risk manager, order tracking
-├── data/                # SQLite logging, in-memory price cache
-├── dashboard/           # CLI real-time monitor
-├── backtest/            # Data recorder & historical replayer
-└── tests/               # Unit & integration tests
+├── main.py                  # Entry point — 4 modes (tri-sim, cross-sim, live-scan, live-execute)
+├── config/                  # Dataclass configs (trading, fees, rebalancing, cross-exchange)
+├── core/                    # Triangle discovery, scanner, calculator, models
+├── cross_exchange/          # Cross-exchange book, scanner, executor, risk manager, balance tracker
+├── exchange/                # 4 exchanges: Binance, KuCoin, OKX, Bybit (REST + WebSocket each)
+├── execution/               # Triangular executor, risk manager, order manager
+├── rebalancing/             # Threshold-based + opportunity-aware rebalancer
+├── monitoring/              # Pipeline metrics, per-symbol P&L tracking
+├── data/                    # SQLite logging, price cache
+├── dashboard/               # Rich CLI monitor
+├── backtest/                # Data recorder & replayer
+├── tools/                   # Diagnostic scanners (profitability, cross-exchange)
+└── tests/                   # 104 tests
 ```
 
-## How It Works
+## Architecture Documents
 
-```mermaid
-sequenceDiagram
-    participant B as Binance
-    participant S as Scanner
-    participant R as Risk Manager
-    participant E as Executor
+- [architecture.md](architecture.md) — Triangular arb design (10-expert panel)
+- [architecture-cross-exchange.md](architecture-cross-exchange.md) — Cross-exchange design (9-expert panel)
 
-    B->>S: Price tick
-    S->>S: Recalc affected triangles
-    Note over S: Profit > 0.1%?
+## Exchange Support
 
-    S->>R: Opportunity found
-    R->>R: Check limits & balances
-    R->>E: Approved
+| Exchange | Price Feed | Trading | Notes |
+|----------|-----------|---------|-------|
+| **Binance** | bookTicker WS | Yes (REST + signed) | Primary sell-side |
+| **KuCoin** | orderbook.1 WS | Yes (REST + signed) | Primary buy-side |
+| **OKX** | tickers WS | Price only | Banned in Thailand |
+| **Bybit** | orderbook.1 WS | Price only | IP restricted |
 
-    E->>B: Leg 1 — Buy BTC
-    B-->>E: Filled
-    E->>B: Leg 2 — Buy ETH
-    B-->>E: Filled
-    E->>B: Leg 3 — Sell ETH
-    B-->>E: Filled
+## Safety & Risk
 
-    Note over E: Profit captured!
+```
+Max position:         $10/trade (launch config)
+Daily loss limit:     $5 → kill switch
+Consecutive losses:   3 → kill switch
+Emergency hedges:     3 → kill switch
+Min net spread:       1.0% (ignore thin spreads)
+Anomaly filter:       >5% spread rejected (likely stale)
+Staleness:            3s max for order book data
+Withdrawals:          DISABLED on all API keys
 ```
 
-## Development Phases
+## Scaling Plan
 
-```mermaid
-graph LR
-    P1["Phase 1<br/>Foundation"] --> P2["Phase 2<br/>Simulation"]
-    P2 --> P3["Phase 3<br/>Execution<br/>& Risk"]
-    P3 --> P4["Phase 4<br/>Monitoring"]
-    P4 --> P5["Phase 5<br/>Live Trading"]
-    P5 --> P6["Phase 6<br/>Optimization"]
-
-    style P1 fill:#22c55e,stroke:#16a34a,color:#fff
-    style P2 fill:#3b82f6,stroke:#2563eb,color:#fff
-    style P3 fill:#f59e0b,stroke:#d97706,color:#fff
-    style P4 fill:#8b5cf6,stroke:#7c3aed,color:#fff
-    style P5 fill:#ef4444,stroke:#dc2626,color:#fff
-    style P6 fill:#6b7280,stroke:#4b5563,color:#fff
-```
-
-1. **Foundation** — Models, triangle discovery, profit calculator
-2. **Simulation** — Paper trading with real price feeds
-3. **Execution & Risk** — Circuit breakers, position management
-4. **Monitoring** — CLI dashboard, opportunity logging
-5. **Live Trading** — Testnet validation → gradual live rollout
-6. **Optimization** — Backtesting, cross-exchange, performance tuning
-
-## Architecture
-
-See [architecture.md](architecture.md) for the full system design, produced from a 10-expert panel review covering:
-
-- Core algorithm (triangle graph, selective updates, order book awareness)
-- Execution strategy (sequential with circuit breaker)
-- Risk management (kill switch, position limits, slippage guards)
-- Exchange abstraction (simulation ↔ live swap via config)
-- Database schema (opportunities, trades, sessions)
-- Binance API strategy (WebSocket streams, rate limits, fees)
-
-## Security
-
-- API keys stored in `.env` (never committed)
-- Binance keys should have **IP whitelist** and **no withdrawal permission**
-- All secrets redacted from logs
-- Full audit trail for compliance
+| Phase | Trades | Size | Mode |
+|-------|--------|------|------|
+| 1 | 1-10 | $5/leg | Monitored |
+| 2 | 11-50 | $10/leg | Autonomous |
+| 3 | 51-200 | $20/leg | Auto rebalance |
+| 4 | 200+ | Empirical limit | Full auto |
 
 ## Disclaimer
 

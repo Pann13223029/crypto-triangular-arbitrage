@@ -2,6 +2,8 @@
 
 > Consensus output from a 10-expert panel review (discuss → brainstorm → debate → discuss).
 
+> **Status:** Triangular arb is fully implemented and tested but market is too efficient for retail on Binance (best triangle -0.2% vs 0.225% break-even). The system has evolved to **cross-exchange arbitrage** — see [architecture-cross-exchange.md](architecture-cross-exchange.md) for the active strategy.
+
 ---
 
 ## 1. Overview
