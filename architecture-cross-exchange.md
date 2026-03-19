@@ -2,7 +2,7 @@
 
 > Consensus from expert panel reviews (9-expert design panel + 8-expert pre-launch review).
 
-> **Status: LIVE-READY.** System verified with real market data. BARD/USDT showing +1-5% net spreads on KuCoin→Binance route. Conditional GO at minimum trade size ($5-10/leg), monitored mode.
+> **Status: BUILT, DEPRIORITIZED.** System verified with real market data but discovered fundamental inventory risk: tokens drop 10-42% while holding, wiping arb profit. Spreads also rotate daily (BARD→SAHARA→gone). Strategy pivoted to **funding rate arbitrage** (delta-neutral, no inventory risk). Cross-exchange infrastructure remains functional for future use.
 
 ---
 

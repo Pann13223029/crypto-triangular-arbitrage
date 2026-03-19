@@ -1,93 +1,110 @@
 # Crypto Arbitrage Trading System
 
-A Python-based arbitrage detection and execution system supporting **triangular arbitrage** (single exchange) and **cross-exchange arbitrage** (Binance + KuCoin + OKX).
+A Python-based arbitrage system supporting three strategies:
 
-## What It Does
+1. **Triangular Arbitrage** — 3-pair cycles on single exchange
+2. **Cross-Exchange Arbitrage** — buy low on one exchange, sell high on another
+3. **Funding Rate Arbitrage** — delta-neutral, collect funding payments (active strategy)
 
 ```mermaid
 graph LR
-    subgraph SingleExchange["Triangular Arb (1 exchange)"]
-        USDT1["USDT"] -->|Buy| BTC1["BTC"]
-        BTC1 -->|Buy| ETH1["ETH"]
-        ETH1 -->|Sell| USDT1
+    subgraph FundingArb["Funding Rate Arb (active)"]
+        SPOT["Long Spot"]
+        PERP["Short Perp"]
+        FUND["Collect Funding<br/>Every 8 Hours"]
+        SPOT --- PERP
+        PERP -->|"delta neutral"| FUND
     end
 
-    subgraph CrossExchange["Cross-Exchange Arb (2+ exchanges)"]
-        KC["KuCoin<br/>Buy BARD @ $0.55"]
-        BN["Binance<br/>Sell BARD @ $0.57"]
-        KC -->|"+3.6% spread"| BN
+    subgraph CrossArb["Cross-Exchange Arb"]
+        KC["Exchange A<br/>Buy cheap"]
+        BN["Exchange B<br/>Sell high"]
+        KC -->|"spread"| BN
     end
 
-    style SingleExchange fill:#1e293b,stroke:#334155,color:#fff
-    style CrossExchange fill:#1e293b,stroke:#334155,color:#fff
+    subgraph TriArb["Triangular Arb"]
+        A["USDT"] --> B["BTC"] --> C["ETH"] --> A
+    end
+
+    style FundingArb fill:#22c55e,stroke:#16a34a,color:#fff
+    style CrossArb fill:#1e293b,stroke:#334155,color:#fff
+    style TriArb fill:#1e293b,stroke:#334155,color:#fff
 ```
 
-**Cross-exchange arb** is the primary strategy — buying assets cheap on one exchange and selling higher on another. Live market validation shows **+1-5% net spreads** on mid-cap pairs like BARD between KuCoin and Binance.
+## Strategy Evolution
 
-## Live Results
+| Strategy | Status | Result |
+|----------|--------|--------|
+| Triangular arb | Built & tested | Market too efficient for retail (0.008% spread vs 0.225% fees) |
+| Cross-exchange arb | Built & tested | Inventory risk: tokens drop 10-42% while holding, wiping arb profit |
+| **Funding rate arb** | **Active** | **Delta-neutral: no directional risk, collect funding every 8h** |
 
-| Metric | Value |
-|--------|-------|
-| Opportunities (60s scan) | 20, **100% profitable** |
-| Best net spread | **+4.72%** (KuCoin → Binance) |
-| Average net spread | **+1.23%** |
-| Target pairs | BARD, SAHARA, CFG, ARKM + 17 more |
-| Exchanges | Binance, KuCoin, OKX (price feed), Bybit (price feed) |
+## Funding Rate Arbitrage
 
-## System Architecture
+The active strategy. Earns income by exploiting funding rate differences on perpetual futures.
 
 ```mermaid
-flowchart TB
-    subgraph Feeds["Real-Time Price Feeds"]
-        BN["Binance<br/>bookTicker"]
-        KC["KuCoin<br/>orderbook.1"]
-        OKX["OKX<br/>tickers"]
+sequenceDiagram
+    participant S as Scanner
+    participant H as Human
+    participant E as Executor
+    participant KC as KuCoin
+
+    S->>S: Scan 550 perps every 8h
+    S->>H: "LRC at 0.37%/8h — Enter? [y/n]"
+    H->>E: Approve (y)
+
+    par Simultaneous entry
+        E->>KC: Buy LRC spot
+        E->>KC: Short LRCUSDTM perp
+    end
+    E->>KC: Set -15% stop-loss
+
+    loop Every 8 hours
+        KC-->>E: Funding payment received
+        E->>E: Check: rate still > 0.05%?
     end
 
-    subgraph Engine["Scanning Engine"]
-        CXB["CrossExchangeBook<br/>(per symbol, per exchange pair)"]
-        FLT["Pre-flight Filter<br/>(balance + anomaly)"]
-        SCN["Scanner<br/>(dedup + staleness)"]
+    Note over E: Rate drops below 0.05%
+    par Exit
+        E->>KC: Close short (buy to cover)
+        E->>KC: Sell spot
     end
-
-    subgraph Execution["Execution"]
-        RISK["Risk Manager<br/>(kill switch, limits)"]
-        EXEC["Executor<br/>(simultaneous orders)"]
-        HEDGE["Emergency Hedge"]
-    end
-
-    subgraph Output["Output"]
-        DB["SQLite Audit Log"]
-        BAL["Balance Tracker"]
-        REB["Rebalancer"]
-    end
-
-    BN & KC & OKX --> CXB --> FLT --> SCN --> RISK --> EXEC
-    EXEC -->|"fail"| HEDGE
-    EXEC --> DB
-    EXEC --> BAL --> REB
-
-    style Feeds fill:#1e293b,stroke:#334155,color:#fff
-    style Engine fill:#1e293b,stroke:#334155,color:#fff
-    style Execution fill:#1e293b,stroke:#334155,color:#fff
-    style Output fill:#1e293b,stroke:#334155,color:#fff
+    E->>H: "Position closed. Net: +$0.27"
 ```
 
-## Features
+### How It Works
 
-- **4-exchange price feeds** — Binance (bookTicker), KuCoin, OKX, Bybit WebSocket streams
-- **Cross-exchange scanning** — aggregated order book per symbol, staleness + anomaly filtering
-- **Pre-flight balance filter** — rejects opportunities that can't execute (eliminated 68% waste)
-- **Simultaneous execution** — both buy and sell orders fire concurrently via asyncio
-- **Maker sell support** — limit sell for lower fees (0.095% vs 0.15% break-even)
-- **Emergency hedge** — if one leg fails, immediately close exposure on same exchange
-- **Risk management** — kill switch, daily loss limit, consecutive loss halt, imbalance-aware filtering
-- **Spread-based position sizing** — 25/50/75/100% of max based on spread confidence
-- **Rebalancing** — threshold-based (25% deviation) + opportunity-aware bias
-- **Pipeline metrics** — per-symbol P&L, timing instrumentation, abort rate tracking
-- **Full audit trail** — every opportunity, trade, and transfer logged to SQLite
-- **Triangular arb** — 192 triangles on Binance (works but market too efficient for retail)
-- **104 unit tests** passing
+1. **Scanner** finds perpetual contracts with high funding rates (>0.10%/8h)
+2. **Human approves** entry (or auto-enter on strong signals)
+3. **Executor** simultaneously buys spot + shorts futures = delta-neutral
+4. **Every 8 hours**, longs pay shorts → you collect funding
+5. **Auto-exit** when funding drops below 0.05% or after 24h max hold
+
+### Current Opportunities (live scan)
+
+```bash
+python -m funding_arb.cli scan
+```
+
+Example output:
+```
+LRCUSDTM          0.3680%/8h  break-even: 5h   *** YES ***
+VANRYUSDTM        0.2754%/8h  break-even: 7h   *** YES ***
+SUPRAUSDTM        0.2317%/8h  break-even: 8h   *** YES ***
+```
+
+### Safety
+
+| Protection | Detail |
+|-----------|--------|
+| **Delta-neutral** | Long spot + short perp = zero price exposure |
+| **Isolated margin** | Only position margin at risk, not whole account |
+| **2x leverage max** | Survives 45% adverse move before liquidation |
+| **Exchange stop-loss** | -15% on exchange (works even if bot crashes) |
+| **Auto-exit** | Funding < 0.05%, or 24h max hold, or 1.5% basis divergence |
+| **State persistence** | JSON state file survives crashes, reconciles on startup |
+| **Orphan detection** | Alerts (never auto-closes) if one leg is missing |
 
 ## Quick Start
 
@@ -103,49 +120,95 @@ pip install -r requirements.txt
 
 # Configure
 cp .env.example .env
-# Edit .env with your API keys (Binance + KuCoin minimum)
+# Edit .env with KuCoin API key + secret + passphrase
 ```
 
-### Scan Only (no API keys needed for public data)
+### Funding Rate Arb (recommended)
 
 ```bash
-# Live scan across 3 exchanges — see real opportunities
+# Scan for opportunities
+python -m funding_arb.cli scan
+
+# Run the bot (scans, asks approval, trades, monitors)
+python -m funding_arb.main_loop
+
+# Check readiness (balances, timing, opportunities)
+python tools/check_readiness.py
+```
+
+### Cross-Exchange Arb
+
+```bash
+# Live scan across 4 exchanges (read-only)
 python main.py --live-scan --duration 60 --dry-run
-```
 
-### Simulated Trading
-
-```bash
-# Cross-exchange simulation with O-U price divergence
+# Simulated cross-exchange trading
 python main.py --cross-exchange --duration 120
-
-# Original triangular arb simulation
-python main.py --mode simulation --duration 120
 ```
 
-### Live Execution (requires API keys + funds)
+### Triangular Arb
 
 ```bash
-# Execute real trades (asks for YES confirmation)
-python main.py --live-scan --execute --duration 60
+python main.py --mode simulation --duration 120
 ```
 
 ## Project Structure
 
 ```
-├── main.py                  # Entry point — 4 modes (tri-sim, cross-sim, live-scan, live-execute)
-├── config/                  # Dataclass configs (trading, fees, rebalancing, cross-exchange)
-├── core/                    # Triangle discovery, scanner, calculator, models
-├── cross_exchange/          # Cross-exchange book, scanner, executor, risk manager, balance tracker
-├── exchange/                # 4 exchanges: Binance, KuCoin, OKX, Bybit (REST + WebSocket each)
-├── execution/               # Triangular executor, risk manager, order manager
-├── rebalancing/             # Threshold-based + opportunity-aware rebalancer
-├── monitoring/              # Pipeline metrics, per-symbol P&L tracking
-├── data/                    # SQLite logging, price cache
+├── funding_arb/             # Funding rate arbitrage (active strategy)
+│   ├── scanner.py           # Scans 550 KuCoin perps for funding spikes
+│   ├── executor.py          # Enters/exits spot+futures positions
+│   ├── position_manager.py  # Entry/exit logic, risk controls
+│   ├── kucoin_futures.py    # KuCoin Futures API client
+│   ├── main_loop.py         # State machine (IDLE→SCAN→ENTER→MONITOR→EXIT)
+│   ├── timing.py            # Funding timestamp utilities
+│   ├── state.py             # JSON state persistence + JSONL ledger
+│   ├── models.py            # FundingOpportunity, FundingPosition
+│   └── cli.py               # CLI: scan, monitor commands
+│
+├── cross_exchange/          # Cross-exchange arbitrage
+│   ├── book.py              # Aggregated order book across exchanges
+│   ├── scanner.py           # Spread detection with pre-flight filter
+│   ├── executor.py          # Simultaneous orders + emergency hedge
+│   ├── risk_manager.py      # Kill switch, imbalance filtering
+│   ├── balance_tracker.py   # Multi-exchange balance aggregation
+│   ├── pair_manager.py      # Adaptive pair selection (1 active + 4 on-deck)
+│   ├── pair_discovery.py    # Full pair scan across exchanges
+│   └── models.py            # CrossExchangeOpportunity, etc.
+│
+├── core/                    # Triangular arbitrage engine
+│   ├── triangle.py          # Graph-based triangle discovery
+│   ├── scanner.py           # Vectorized opportunity detection
+│   ├── calculator.py        # Numpy profit calculation
+│   └── models.py            # Ticker, OrderBook, Order, etc.
+│
+├── exchange/                # Exchange adapters (6 exchanges)
+│   ├── binance_th.py        # Binance Thailand (live trading)
+│   ├── binance_live.py      # Binance Global (live trading)
+│   ├── binance_ws.py        # Binance WebSocket (bookTicker)
+│   ├── binance_rest.py      # Binance REST
+│   ├── kucoin_rest.py       # KuCoin REST (spot)
+│   ├── kucoin_ws.py         # KuCoin WebSocket
+│   ├── okx_rest.py          # OKX REST
+│   ├── okx_ws.py            # OKX WebSocket
+│   ├── bybit_rest.py        # Bybit REST
+│   ├── bybit_ws.py          # Bybit WebSocket
+│   ├── simulator.py         # Paper trading simulator
+│   ├── multi_sim.py         # Multi-exchange O-U simulator
+│   └── base.py              # Abstract ExchangeBase interface
+│
+├── execution/               # Triangular arb execution
+├── rebalancing/             # Threshold-based + opportunity-aware
+├── monitoring/              # Pipeline metrics, per-symbol P&L
 ├── dashboard/               # Rich CLI monitor
+├── data/                    # SQLite logging, price cache
 ├── backtest/                # Data recorder & replayer
-├── tools/                   # Diagnostic scanners (profitability, cross-exchange)
-└── tests/                   # 104 tests
+├── tools/                   # Diagnostic scripts
+│   ├── check_readiness.py   # Pre-trade readiness check
+│   ├── scan_cross_exchange.py
+│   └── scan_profitability.py
+├── tests/                   # 147 tests
+└── config/                  # Dataclass-based configuration
 ```
 
 ## Architecture Documents
@@ -155,38 +218,46 @@ python main.py --live-scan --execute --duration 60
 
 ## Exchange Support
 
-| Exchange | Price Feed | Trading | Notes |
-|----------|-----------|---------|-------|
-| **Binance** | bookTicker WS | Yes (REST + signed) | Primary sell-side |
-| **KuCoin** | orderbook.1 WS | Yes (REST + signed) | Primary buy-side |
-| **OKX** | tickers WS | Price only | Banned in Thailand |
-| **Bybit** | orderbook.1 WS | Price only | IP restricted |
+| Exchange | Spot | Futures | WebSocket | Status |
+|----------|------|---------|-----------|--------|
+| **KuCoin** | REST + WS | REST (futures) | ticker, orderbook | **Active** (funding arb) |
+| **Binance TH** | REST | — | bookTicker | Active (cross-exchange sell) |
+| **Binance Global** | REST | — | bookTicker | Price feed |
+| **OKX** | REST + WS | — | tickers | Price feed only |
+| **Bybit** | REST + WS | — | orderbook.1 | Price feed only |
 
-## Safety & Risk
+## Configuration
 
+Key parameters in `config/settings.py` and `funding_arb/main_loop.py`:
+
+```yaml
+# Funding Rate Arb
+leverage:           2x (isolated margin)
+stop_loss:          -15% on exchange
+min_funding_rate:   0.10% per 8h to enter
+exit_funding_rate:  0.05% per 8h to exit
+max_hold:           24 hours
+basis_stop_loss:    1.5% divergence
+entry_window:       T-2h before funding (00:00, 08:00, 16:00 UTC)
+approval:           human (5min timeout)
+
+# Cross-Exchange Arb
+max_position:       $10
+daily_loss_limit:   $5
+min_net_spread:     1.0%
+anomaly_filter:     >5% rejected
 ```
-Max position:         $10/trade (launch config)
-Daily loss limit:     $5 → kill switch
-Consecutive losses:   3 → kill switch
-Emergency hedges:     3 → kill switch
-Min net spread:       1.0% (ignore thin spreads)
-Anomaly filter:       >5% spread rejected (likely stale)
-Staleness:            3s max for order book data
-Withdrawals:          DISABLED on all API keys
+
+## Tests
+
+```bash
+python -m pytest tests/ -v
+# 147 tests passing
 ```
-
-## Scaling Plan
-
-| Phase | Trades | Size | Mode |
-|-------|--------|------|------|
-| 1 | 1-10 | $5/leg | Monitored |
-| 2 | 11-50 | $10/leg | Autonomous |
-| 3 | 51-200 | $20/leg | Auto rebalance |
-| 4 | 200+ | Empirical limit | Full auto |
 
 ## Disclaimer
 
-This software is for educational and research purposes. Cryptocurrency trading involves significant risk. Use at your own risk.
+This software is for educational and research purposes. Cryptocurrency trading involves significant risk, including the risk of total loss. Use at your own risk. Never trade with money you cannot afford to lose.
 
 ## License
 
