@@ -31,6 +31,7 @@ class KuCoinExchange(ExchangeBase):
         self._api_secret = api_secret
         self._passphrase = passphrase
         self._exchange_id = exchange_id
+        self._pairs: dict[str, TradingPair] = {}
         self._fee_schedule = FeeSchedule(
             exchange_id=exchange_id,
             taker_fee=0.001,  # 0.10% default
@@ -148,6 +149,8 @@ class KuCoinExchange(ExchangeBase):
                 min_notional=float(item.get("quoteMinSize", 0)),
             ))
 
+        for p in pairs:
+            self._pairs[p.symbol] = p
         logger.info("KuCoin: loaded %d trading pairs", len(pairs))
         return pairs
 
@@ -209,6 +212,13 @@ class KuCoinExchange(ExchangeBase):
         import uuid
         kc_symbol = self._to_kucoin_symbol(symbol)
 
+        # Round quantity to step size (KuCoin rejects invalid increments)
+        import math
+        pair = self._pairs.get(symbol)
+        if pair and pair.step_size > 0:
+            precision = max(0, -int(math.log10(pair.step_size)))
+            quantity = math.floor(quantity * (10 ** precision)) / (10 ** precision)
+
         body = {
             "clientOid": str(uuid.uuid4()),
             "side": "buy" if side == OrderSide.BUY else "sell",
@@ -217,7 +227,7 @@ class KuCoinExchange(ExchangeBase):
             "size": str(quantity),
         }
         if price:
-            body["price"] = str(price)
+            body["price"] = str(round(price, 8))
 
         try:
             result = await self._private_post("/api/v1/orders", body)

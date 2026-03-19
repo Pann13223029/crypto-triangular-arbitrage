@@ -113,14 +113,19 @@ class CrossExchangeExecutor:
             self.total_aborts += 1
             return result
 
-        quantity = available_usd / opportunity.buy_price
+        raw_quantity = available_usd / opportunity.buy_price
+
+        # Round quantity to exchange step sizes
+        # Use conservative rounding: floor to avoid exceeding balance
+        quantity = self._round_quantity(raw_quantity, opportunity.buy_price)
 
         # Determine sell strategy
         use_maker = self.cx_config.use_maker_sell and spread > 0.002
         sell_price = None
         if use_maker:
             # Place limit sell slightly below bid to get maker fee
-            sell_price = opportunity.sell_price * (1 - self.cx_config.maker_sell_offset)
+            raw_sell_price = opportunity.sell_price * (1 - self.cx_config.maker_sell_offset)
+            sell_price = self._round_price(raw_sell_price)
             order_type = "MAKER"
         else:
             order_type = "TAKER"
@@ -289,6 +294,31 @@ class CrossExchangeExecutor:
 
         result.status = CrossTradeStatus.COMPLETED
         return result
+
+    @staticmethod
+    def _round_quantity(quantity: float, price: float) -> float:
+        """Round quantity down to appropriate precision based on price level."""
+        import math
+        if price >= 1000:
+            return math.floor(quantity * 100000) / 100000  # 5 decimals (BTC etc)
+        elif price >= 10:
+            return math.floor(quantity * 1000) / 1000  # 3 decimals
+        elif price >= 0.1:
+            return math.floor(quantity * 10) / 10  # 1 decimal
+        else:
+            return math.floor(quantity)  # Integer for micro-cap (<$0.10)
+
+    @staticmethod
+    def _round_price(price: float) -> float:
+        """Round price to appropriate tick size based on price level."""
+        if price >= 100:
+            return round(price, 2)
+        elif price >= 1:
+            return round(price, 4)
+        elif price >= 0.01:
+            return round(price, 6)
+        else:
+            return round(price, 8)
 
     async def _emergency_hedge(
         self, exchange: ExchangeBase, symbol: str, side: OrderSide, quantity: float
