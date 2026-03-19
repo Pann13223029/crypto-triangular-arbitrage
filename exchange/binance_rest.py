@@ -97,6 +97,21 @@ class BinanceREST:
         logger.info("Loaded %d trading pairs from Binance", len(pairs))
         return pairs
 
+    async def get_ticker(self, symbol: str) -> "Ticker":
+        """Fetch best bid/ask for a symbol via bookTicker endpoint."""
+        from core.models import Ticker
+        session = await self._get_session()
+        url = f"{BINANCE_API_URL}/api/v3/ticker/bookTicker"
+        async with session.get(url, params={"symbol": symbol}) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"BookTicker failed ({resp.status})")
+            data = await resp.json()
+        return Ticker(
+            symbol=data["symbol"],
+            bid=float(data["bidPrice"]),
+            ask=float(data["askPrice"]),
+        )
+
     async def get_ticker_prices(self) -> dict[str, float]:
         """Fetch all current prices (simple price endpoint)."""
         session = await self._get_session()
