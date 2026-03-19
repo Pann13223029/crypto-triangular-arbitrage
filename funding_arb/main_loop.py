@@ -191,8 +191,42 @@ async def run_main_loop():
         return
 
     current_state = "MONITORING" if existing else "IDLE"
-    if existing:
-        logger.info("Resuming monitoring of %s", existing.get("symbol"))
+    if existing and not existing.get("orphaned"):
+        # Rebuild position manager state from saved state file
+        from funding_arb.models import FundingDirection, FundingPosition, PositionStatus
+        restored = FundingPosition(
+            symbol=existing.get("symbol", ""),
+            base_asset=existing.get("base_asset", ""),
+            spot_symbol=existing.get("base_asset", "") + "-USDT",
+            direction=FundingDirection.LONGS_PAY,
+            spot_quantity=existing.get("spot_quantity", 0),
+            spot_entry_price=existing.get("spot_entry_price", 0),
+            futures_quantity=existing.get("futures_quantity", 0),
+            futures_entry_price=existing.get("futures_entry_price", 0),
+            position_usd=existing.get("position_usd", 0),
+            entry_funding_rate=existing.get("entry_funding_rate", 0),
+            funding_collected=existing.get("funding_collected", 0),
+            funding_periods=existing.get("funding_periods", 0),
+            total_fees=existing.get("total_fees", 0),
+            status=PositionStatus.ACTIVE,
+        )
+        # Parse entry time
+        entry_time_str = existing.get("entry_time", "")
+        if entry_time_str:
+            try:
+                from datetime import datetime
+                dt = datetime.fromisoformat(entry_time_str)
+                restored.entry_time_ms = int(dt.timestamp() * 1000)
+            except Exception:
+                pass
+
+        pm.active_position = restored
+        pm.total_entries = 1
+        logger.info(
+            "Resumed: %s | Funding: $%.4f (%d periods) | Fees: $%.4f | Held: %.1fh",
+            restored.symbol, restored.funding_collected, restored.funding_periods,
+            restored.total_fees, restored.holding_hours,
+        )
 
     # Check balances
     try:
