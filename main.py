@@ -732,8 +732,8 @@ async def run_live_cross_exchange(args):
 
         # Create live exchange instances for available keys
         if bn_key and bn_secret:
-            from exchange.binance_live import BinanceLiveExchange
-            live_exchanges["binance"] = BinanceLiveExchange(bn_key, bn_secret)
+            from exchange.binance_th import BinanceTHExchange
+            live_exchanges["binance"] = BinanceTHExchange(bn_key, bn_secret)
             logger.info("Binance: LIVE exchange connected")
 
         if kc_key and kc_secret:
