@@ -26,7 +26,7 @@ from funding_arb.timing import (
 logger = logging.getLogger(__name__)
 
 # --- Config ---
-ENTRY_WINDOW_MINUTES = 120
+ENTRY_WINDOW_MINUTES = 480  # Always in window — enter immediately when opportunity found
 SCAN_INTERVAL_MIN = 15
 MONITOR_INTERVAL_SEC = 300  # 5 minutes
 FUNDING_CONFIRM_DELAY_SEC = 300  # Check 5 min after timestamp
@@ -63,15 +63,18 @@ def alert(message: str) -> None:
 
 async def get_approval(opportunity, timeout: int = APPROVAL_TIMEOUT_SEC) -> bool:
     """Ask human to approve entry. Returns True if approved."""
-    print(f"\n{'='*60}")
-    print(f"  OPPORTUNITY: {opportunity.symbol}")
-    print(f"  Rate:     {opportunity.funding_rate:.4%}/8h ({opportunity.daily_rate:.4%}/day)")
-    print(f"  APY:      {opportunity.annualized * 100:.0f}%")
-    print(f"  Strategy: Long {opportunity.base_asset} spot + Short {opportunity.symbol} perp")
     fee_cost = 0.0024
     be = fee_cost / abs(opportunity.funding_rate)
-    print(f"  Break-even: {be:.1f} periods ({be * 8:.0f}h)")
-    print(f"  Next funding in: {minutes_until_next_funding():.0f} min")
+    predicted = opportunity.predicted_rate
+
+    print(f"\n{'='*60}")
+    print(f"  OPPORTUNITY: {opportunity.symbol}")
+    print(f"  Current rate:   {opportunity.funding_rate:.4%}/8h ({opportunity.daily_rate:.4%}/day)")
+    print(f"  Predicted next: {predicted:.4%}/8h {'OK' if predicted >= 0 else 'WARNING: FLIPPING'}")
+    print(f"  APY:            {opportunity.annualized * 100:.0f}%")
+    print(f"  Strategy:       Long {opportunity.base_asset} spot + Short {opportunity.symbol} perp")
+    print(f"  Break-even:     {be:.1f} periods ({be * 8:.0f}h)")
+    print(f"  Next funding:   {minutes_until_next_funding():.0f} min")
     print(f"{'='*60}")
     print(f"  Enter? [y/n] (timeout {timeout}s): ", end="", flush=True)
 
@@ -235,12 +238,13 @@ async def run_main_loop():
                     logger.info("Watchlist scan (%d symbols)...", len(load_watchlist()))
                     all_opps = await scanner.scan()
 
-                # Filter tradeable (LONGS_PAY + above threshold)
+                # Filter tradeable (LONGS_PAY + above threshold + predicted rate still positive)
                 tradeable = [
                     o for o in all_opps
                     if o.is_longs_pay
                     and o.abs_rate >= MIN_FUNDING_RATE
                     and o.abs_rate <= MAX_FUNDING_RATE
+                    and o.predicted_rate >= 0  # Don't enter if next period flips negative
                 ]
 
                 if tradeable:
