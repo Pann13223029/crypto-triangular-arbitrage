@@ -34,8 +34,9 @@ APPROVAL_TIMEOUT_SEC = 300  # 5 min for human
 MIN_FUNDING_RATE = 0.001  # 0.10%
 MIN_FUNDING_RATE_AUTO = 0.002  # 0.20% for auto-enter
 MAX_FUNDING_RATE = 0.03  # 3% anomaly filter
-EXIT_FUNDING_RATE = 0.0005  # 0.05%
-MAX_HOLD_HOURS = 24
+EXIT_FUNDING_RATE = 0.0012  # 0.12% — exit if rate drops below (panel: stop dead money)
+STAY_THRESHOLD = 0.0018  # 0.18% — only stay for 3rd payment if rate still above this
+MAX_HOLD_HOURS = 32  # Hard cap
 BASIS_STOP_LOSS = 0.015  # 1.5%
 EXIT_GRACE_MINUTES = 10
 AUTO_ENTER = False
@@ -342,6 +343,22 @@ async def run_main_loop():
                     current_rate = 0
 
                 should_exit, reason = pm.should_exit(current_rate)
+
+                # Dynamic 2-payment strategy (panel consensus)
+                if pm.active_position:
+                    periods = pm.active_position.funding_periods
+
+                    # After 2 payments: exit UNLESS rate still strong
+                    if not should_exit and periods >= 2 and current_rate < STAY_THRESHOLD:
+                        should_exit = True
+                        reason = f"2 payments collected, rate {current_rate:.4%} < stay threshold {STAY_THRESHOLD:.4%}"
+                        logger.info("Dynamic exit: %s", reason)
+
+                    # After 3 payments: always exit (diminishing returns)
+                    if not should_exit and periods >= 3:
+                        should_exit = True
+                        reason = f"3 payments collected — diminishing returns"
+                        logger.info("Dynamic exit: %s", reason)
 
                 # Grace period near funding
                 if should_exit and "normalized" in reason.lower():
