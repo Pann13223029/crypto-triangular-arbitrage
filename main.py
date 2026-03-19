@@ -946,7 +946,26 @@ async def run_live_cross_exchange(args):
                 by_ws.total_messages, ok_ws.total_messages,
             )
 
-    logger.info("Connecting to 3 exchanges...")
+    # REST price poller for Binance TH (WS is global Binance, not TH)
+    bn_th_poller = None
+    if execute_mode and "binance" in live_exchanges:
+        async def poll_binance_th():
+            """Poll Binance TH REST prices every 2s for active symbols."""
+            bn_ex = live_exchanges["binance"]
+            while True:
+                for symbol in list(sym_set):
+                    try:
+                        ticker = await bn_ex.get_ticker(symbol)
+                        if ticker.bid > 0 and ticker.ask > 0:
+                            handler = make_handler("binance")
+                            handler(ticker)
+                    except Exception:
+                        pass
+                await asyncio.sleep(2)
+
+        bn_th_poller = poll_binance_th
+
+    logger.info("Connecting to exchanges...")
 
     await bn_ws.connect(sym_set)
     await kc_ws.connect(sym_set)
@@ -958,6 +977,7 @@ async def run_live_cross_exchange(args):
     watchdog_task = asyncio.create_task(duration_watchdog()) if args.duration > 0 else None
     stats_task = asyncio.create_task(stats_loop())
     executor_task = asyncio.create_task(execute_opportunities()) if execute_mode else None
+    poller_task = asyncio.create_task(bn_th_poller()) if bn_th_poller else None
 
     try:
         await asyncio.gather(
@@ -973,6 +993,8 @@ async def run_live_cross_exchange(args):
         stats_task.cancel()
         if watchdog_task:
             watchdog_task.cancel()
+        if poller_task:
+            poller_task.cancel()
         if executor_task and opp_queue:
             await opp_queue.put(None)
             await executor_task
