@@ -82,18 +82,40 @@ class FundingExecutor:
             # Each lot = multiplier * 1 contract worth of the base asset
             # Position USD / price = quantity in base asset
             # Quantity / multiplier = number of lots
-            base_qty = pos.position_usd / current_price
-            num_lots = max(lot_size, int(base_qty / multiplier))
+            # Calculate lots from budget
+            base_qty_budget = pos.position_usd / current_price
+            num_lots = max(lot_size, int(base_qty_budget / multiplier))
 
-            # Actual notional
-            actual_base = num_lots * multiplier
-            actual_usd = actual_base * current_price
+            # Futures notional (may be larger than budget due to lot sizing)
+            futures_base = num_lots * multiplier
+            futures_usd = futures_base * current_price
+
+            # Spot quantity = what we can actually buy with our budget
+            # Match as close to futures as possible, but capped by available USDT
+            spot_balance = await self.spot.get_balance("USDT")
+            spot_budget = min(pos.position_usd, spot_balance * 0.95)  # Keep 5% buffer
+            spot_qty = spot_budget / current_price
+
+            # Round spot quantity down
+            spot_qty = int(spot_qty) if current_price < 0.1 else round(spot_qty, 2)
+
+            hedge_ratio = spot_qty / futures_base if futures_base > 0 else 0
 
             logger.info(
-                "  Contract: %s multiplier=%s | %d lots = %.4f %s (~$%.2f)",
+                "  Contract: %s multiplier=%s | %d lots = %.0f %s (~$%.2f)",
                 futures_symbol, multiplier, num_lots,
-                actual_base, opp.base_asset, actual_usd,
+                futures_base, opp.base_asset, futures_usd,
             )
+            logger.info(
+                "  Spot buy: %.0f %s (~$%.2f) | Hedge ratio: %.1f%%",
+                spot_qty, opp.base_asset, spot_qty * current_price,
+                hedge_ratio * 100,
+            )
+
+            if hedge_ratio < 0.3:
+                logger.warning("  Hedge ratio too low (%.0f%%) — futures too large for budget", hedge_ratio * 100)
+                # Still proceed — partial hedge is better than no position
+                # The unhedged portion acts as a small directional short
 
             # 2. Set isolated margin + leverage
             try:
@@ -113,10 +135,9 @@ class FundingExecutor:
             futures_order_id = futures_result.get("orderId", "")
             logger.info("  Leg 1: SHORT filled — order %s", futures_order_id)
 
-            # 4. Buy spot
-            # Round quantity for KuCoin spot
-            spot_qty = actual_base
-            logger.info("  Leg 2: BUY %.4f %s spot...", spot_qty, opp.base_asset)
+            # 4. Buy spot (budget-sized, not contract-sized)
+            logger.info("  Leg 2: BUY %.0f %s spot (~$%.2f)...",
+                        spot_qty, opp.base_asset, spot_qty * current_price)
 
             from core.models import OrderSide
             spot_order = await self.spot.place_order(
@@ -161,7 +182,7 @@ class FundingExecutor:
             pos.spot_entry_price = spot_order.actual_price or current_price
             pos.futures_quantity = num_lots
             pos.futures_entry_price = current_price
-            pos.position_usd = actual_usd
+            pos.position_usd = futures_usd
             pos.total_fees = (spot_order.fee or 0) + actual_usd * 0.0006  # Estimated futures fee
             pos.status = PositionStatus.ACTIVE
 
@@ -220,13 +241,20 @@ class FundingExecutor:
             )
             logger.info("  Leg 1: Short closed")
 
-            # 3. Sell spot
-            logger.info("  Leg 2: SELL %.4f %s spot...", pos.spot_quantity, pos.base_asset)
+            # 3. Sell spot — use actual balance, not saved quantity
             from core.models import OrderSide
+            actual_spot_balance = await self.spot.get_balance(pos.base_asset)
+            sell_qty = actual_spot_balance if actual_spot_balance > 0 else pos.spot_quantity
+            # Round down for KuCoin
+            import math
+            sell_qty = math.floor(sell_qty) if pos.spot_entry_price < 0.1 else round(sell_qty, 2)
+
+            logger.info("  Leg 2: SELL %.0f %s spot (balance: %.0f)...",
+                        sell_qty, pos.base_asset, actual_spot_balance)
             spot_order = await self.spot.place_order(
                 symbol=pos.base_asset + "USDT",
                 side=OrderSide.SELL,
-                quantity=pos.spot_quantity,
+                quantity=sell_qty,
             )
             exit_fee = (spot_order.fee or 0) + pos.position_usd * 0.0006
             pos.total_fees += exit_fee
