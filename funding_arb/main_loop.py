@@ -31,7 +31,7 @@ SCAN_INTERVAL_MIN = 15
 MONITOR_INTERVAL_SEC = 300  # 5 minutes
 FUNDING_CONFIRM_DELAY_SEC = 300  # Check 5 min after timestamp
 APPROVAL_TIMEOUT_SEC = 300  # 5 min for human
-MIN_FUNDING_RATE = 0.001  # 0.10%
+MIN_FUNDING_RATE = 0.0025  # 0.25% — panel recommendation (accounts for decay + fees)
 MIN_FUNDING_RATE_AUTO = 0.002  # 0.20% for auto-enter
 MAX_FUNDING_RATE = 0.03  # 3% anomaly filter
 EXIT_FUNDING_RATE = 0.0012  # 0.12% — exit if rate drops below (panel: stop dead money)
@@ -273,7 +273,7 @@ async def run_main_loop():
                     logger.info("Watchlist scan (%d symbols)...", len(load_watchlist()))
                     all_opps = await scanner.scan()
 
-                # Filter tradeable (LONGS_PAY + above threshold + predicted rate still positive)
+                # Filter tradeable (LONGS_PAY + above threshold + predicted positive + consistent)
                 tradeable = [
                     o for o in all_opps
                     if o.is_longs_pay
@@ -281,6 +281,14 @@ async def run_main_loop():
                     and o.abs_rate <= MAX_FUNDING_RATE
                     and o.predicted_rate >= 0  # Don't enter if next period flips negative
                 ]
+
+                # Rate consistency check: prefer tokens with 2+ scans above threshold
+                # On first scan, allow entry. On subsequent scans, require consistency.
+                if scanner.total_scans >= 2:
+                    consistent = [o for o in tradeable if scanner.is_rate_consistent(o.symbol, 2)]
+                    if consistent:
+                        tradeable = consistent
+                        logger.info("  Rate consistency filter: %d/%d passed", len(consistent), len(tradeable))
 
                 if tradeable:
                     logger.info("Found %d tradeable opportunities:", len(tradeable))

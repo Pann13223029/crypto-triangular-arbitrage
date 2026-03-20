@@ -31,6 +31,9 @@ class FundingScanner:
         # Cached contract info
         self.contracts: dict[str, dict] = {}
 
+        # Rate history: symbol -> list of (rate, timestamp)
+        self._rate_history: dict[str, list[tuple[float, int]]] = {}
+
         # Stats
         self.total_scans: int = 0
         self.total_opportunities: int = 0
@@ -75,6 +78,14 @@ class FundingScanner:
                     rate = float(d.get("value", 0))
                     predicted = float(d.get("predictedValue", 0))
                     abs_rate = abs(rate)
+
+                    # Track rate history
+                    now_ms = time_ns() // 1_000_000
+                    if sym not in self._rate_history:
+                        self._rate_history[sym] = []
+                    self._rate_history[sym].append((rate, now_ms))
+                    # Keep last 10 entries
+                    self._rate_history[sym] = self._rate_history[sym][-10:]
 
                     # Filter
                     if abs_rate < self.min_funding_rate:
@@ -126,9 +137,23 @@ class FundingScanner:
         """Get cached contract details (multiplier, lot size, etc.)."""
         return self.contracts.get(symbol, {})
 
+    def is_rate_consistent(self, symbol: str, min_snapshots: int = 2) -> bool:
+        """Check if a symbol has had consistently high rates across multiple scans."""
+        history = self._rate_history.get(symbol, [])
+        if len(history) < min_snapshots:
+            return False
+        # Check that the last N snapshots are all above minimum threshold
+        recent = history[-min_snapshots:]
+        return all(abs(rate) >= self.min_funding_rate for rate, _ in recent)
+
+    def get_rate_history(self, symbol: str) -> list[float]:
+        """Get recent rate history for a symbol."""
+        return [rate for rate, _ in self._rate_history.get(symbol, [])]
+
     def stats(self) -> dict:
         return {
             "total_scans": self.total_scans,
             "contracts_cached": len(self.contracts),
             "last_opportunities": self.total_opportunities,
+            "rate_histories": len(self._rate_history),
         }

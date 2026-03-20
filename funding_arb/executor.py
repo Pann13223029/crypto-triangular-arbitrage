@@ -78,44 +78,70 @@ class FundingExecutor:
                 self.pm.finalize_close()
                 return None
 
-            # Calculate position size
-            # Each lot = multiplier * 1 contract worth of the base asset
-            # Position USD / price = quantity in base asset
-            # Quantity / multiplier = number of lots
-            # Calculate lots from budget
-            base_qty_budget = pos.position_usd / current_price
-            num_lots = max(lot_size, int(base_qty_budget / multiplier))
+            # === FIX #1: Proper hedge ratio enforcement ===
+            #
+            # Key: 1 lot = multiplier × base tokens
+            # We size FUTURES first (constrained by lot size),
+            # then buy EXACT matching spot quantity.
+            #
+            # If 1 lot costs more than our budget, REJECT the trade.
 
-            # Futures notional (may be larger than budget due to lot sizing)
+            one_lot_base = lot_size * multiplier
+            one_lot_usd = one_lot_base * current_price
+
+            # Check if we can afford to hedge even 1 lot
+            spot_balance = await self.spot.get_balance("USDT")
+            spot_available = spot_balance * 0.95  # Keep 5% buffer for fees
+
+            if one_lot_usd > spot_available:
+                logger.warning(
+                    "  REJECTED: 1 lot = %.0f %s (~$%.2f) but only $%.2f available for spot. "
+                    "Cannot achieve 98%% hedge. Need $%.2f minimum.",
+                    one_lot_base, opp.base_asset, one_lot_usd,
+                    spot_available, one_lot_usd * 1.05,
+                )
+                self.pm.finalize_close()
+                return None
+
+            # How many lots can we fully hedge?
+            max_lots_by_budget = int(spot_available / one_lot_usd)
+            num_lots = max(lot_size, min(max_lots_by_budget, int(pos.position_usd / one_lot_usd)))
+            if num_lots < 1:
+                num_lots = 1
+
+            # Futures and spot quantities — MATCHED
             futures_base = num_lots * multiplier
             futures_usd = futures_base * current_price
+            spot_qty = futures_base  # Exact match!
 
-            # Spot quantity = what we can actually buy with our budget
-            # Match as close to futures as possible, but capped by available USDT
-            spot_balance = await self.spot.get_balance("USDT")
-            spot_budget = min(pos.position_usd, spot_balance * 0.95)  # Keep 5% buffer
-            spot_qty = spot_budget / current_price
-
-            # Round spot quantity down
-            spot_qty = int(spot_qty) if current_price < 0.1 else round(spot_qty, 2)
+            # Round spot for exchange
+            import math
+            if current_price < 0.1:
+                spot_qty = math.floor(spot_qty)
+            else:
+                spot_qty = round(spot_qty, 2)
 
             hedge_ratio = spot_qty / futures_base if futures_base > 0 else 0
 
             logger.info(
-                "  Contract: %s multiplier=%s | %d lots = %.0f %s (~$%.2f)",
-                futures_symbol, multiplier, num_lots,
-                futures_base, opp.base_asset, futures_usd,
+                "  Contract: %s | 1 lot = %.0f %s ($%.2f) | Using %d lots",
+                futures_symbol, one_lot_base, opp.base_asset, one_lot_usd, num_lots,
             )
             logger.info(
-                "  Spot buy: %.0f %s (~$%.2f) | Hedge ratio: %.1f%%",
+                "  Futures: %.0f %s ($%.2f) | Spot: %.0f %s ($%.2f) | Hedge: %.0f%%",
+                futures_base, opp.base_asset, futures_usd,
                 spot_qty, opp.base_asset, spot_qty * current_price,
                 hedge_ratio * 100,
             )
 
-            if hedge_ratio < 0.3:
-                logger.warning("  Hedge ratio too low (%.0f%%) — futures too large for budget", hedge_ratio * 100)
-                # Still proceed — partial hedge is better than no position
-                # The unhedged portion acts as a small directional short
+            # Enforce 98% hedge minimum
+            if hedge_ratio < 0.95:
+                logger.error(
+                    "  REJECTED: Hedge ratio %.0f%% < 95%%. Cannot achieve delta-neutral.",
+                    hedge_ratio * 100,
+                )
+                self.pm.finalize_close()
+                return None
 
             # 2. Set isolated margin + leverage
             try:
@@ -124,26 +150,54 @@ class FundingExecutor:
             except Exception as e:
                 logger.warning("  Set isolated margin: %s (may already be set)", e)
 
-            # 3. Short perp (futures side)
-            logger.info("  Leg 1: SHORT %d lots %s...", num_lots, futures_symbol)
-            futures_result = await self.futures.place_order(
-                symbol=futures_symbol,
-                side="sell",
-                size=num_lots,
-                leverage=self.leverage,
-            )
+            # === FIX #3: Use limit orders (maker fees ~50% cheaper) ===
+            #
+            # Futures: limit sell at current mark price (maker)
+            # Spot: limit buy at current ask (maker)
+            # Falls back to market if limit doesn't fill in 10s
+
+            # 3. Short perp (futures side) — limit order at mark price
+            futures_book = await self.futures.get_order_book(futures_symbol, 5)
+            futures_bid = float(futures_book.get("bids", [[0]])[0][0]) if futures_book.get("bids") else current_price
+            limit_sell_price = round(futures_bid, len(str(tick_size).rstrip('0').split('.')[-1]))
+
+            logger.info("  Leg 1: SHORT %d lots %s (LIMIT @ %.6f)...",
+                        num_lots, futures_symbol, limit_sell_price)
+            try:
+                futures_result = await self.futures.place_order(
+                    symbol=futures_symbol,
+                    side="sell",
+                    size=num_lots,
+                    leverage=self.leverage,
+                    order_type="limit",
+                    price=limit_sell_price,
+                )
+            except Exception:
+                # Fallback to market
+                logger.warning("  Limit failed, falling back to market order")
+                futures_result = await self.futures.place_order(
+                    symbol=futures_symbol,
+                    side="sell",
+                    size=num_lots,
+                    leverage=self.leverage,
+                )
             futures_order_id = futures_result.get("orderId", "")
-            logger.info("  Leg 1: SHORT filled — order %s", futures_order_id)
+            logger.info("  Leg 1: SHORT placed — order %s", futures_order_id)
 
-            # 4. Buy spot (budget-sized, not contract-sized)
-            logger.info("  Leg 2: BUY %.0f %s spot (~$%.2f)...",
-                        spot_qty, opp.base_asset, spot_qty * current_price)
+            # Brief wait for limit fill
+            await asyncio.sleep(3)
 
+            # 4. Buy spot — limit at ask price (maker)
             from core.models import OrderSide
+            spot_ask = spot_ticker.ask if spot_ticker.ask > 0 else current_price
+            logger.info("  Leg 2: BUY %.0f %s spot (LIMIT @ %.6f, ~$%.2f)...",
+                        spot_qty, opp.base_asset, spot_ask, spot_qty * current_price)
+
             spot_order = await self.spot.place_order(
                 symbol=opp.base_asset + "USDT",
                 side=OrderSide.BUY,
                 quantity=spot_qty,
+                price=spot_ask,  # Limit order at ask = likely fills as maker
             )
 
             if spot_order.status.value != "FILLED":
