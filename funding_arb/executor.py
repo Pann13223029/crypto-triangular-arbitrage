@@ -231,7 +231,7 @@ class FundingExecutor:
             pos.futures_quantity = num_lots
             pos.futures_entry_price = current_price
             pos.position_usd = futures_usd
-            pos.total_fees = (spot_order.fee or 0) + actual_usd * 0.0006  # Estimated futures fee
+            pos.total_fees = (spot_order.fee or 0) + futures_usd * 0.0006  # Estimated futures fee
             pos.status = PositionStatus.ACTIVE
 
             logger.info(
