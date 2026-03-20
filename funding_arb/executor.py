@@ -150,55 +150,49 @@ class FundingExecutor:
             except Exception as e:
                 logger.warning("  Set isolated margin: %s (may already be set)", e)
 
-            # === FIX #3: Use limit orders (maker fees ~50% cheaper) ===
+            # === FIX #3: Use market orders (reliable) with limit fallback for spot ===
             #
-            # Futures: limit sell at current mark price (maker)
-            # Spot: limit buy at current ask (maker)
-            # Falls back to market if limit doesn't fill in 10s
+            # Futures: MARKET order (limit orders on futures have tick size issues)
+            # Spot: try limit at ask, fallback to market
 
-            # 3. Short perp (futures side) — limit order at mark price
-            futures_book = await self.futures.get_order_book(futures_symbol, 5)
-            futures_bid = float(futures_book.get("bids", [[0]])[0][0]) if futures_book.get("bids") else current_price
-            limit_sell_price = round(futures_bid, len(str(tick_size).rstrip('0').split('.')[-1]))
-
-            logger.info("  Leg 1: SHORT %d lots %s (LIMIT @ %.6f)...",
-                        num_lots, futures_symbol, limit_sell_price)
+            # 3. Short perp (futures side) — market order (reliable)
+            logger.info("  Leg 1: SHORT %d lots %s (MARKET)...", num_lots, futures_symbol)
             try:
                 futures_result = await self.futures.place_order(
                     symbol=futures_symbol,
                     side="sell",
                     size=num_lots,
                     leverage=self.leverage,
-                    order_type="limit",
-                    price=limit_sell_price,
                 )
-            except Exception:
-                # Fallback to market
-                logger.warning("  Limit failed, falling back to market order")
-                futures_result = await self.futures.place_order(
-                    symbol=futures_symbol,
-                    side="sell",
-                    size=num_lots,
-                    leverage=self.leverage,
-                )
+            except Exception as e:
+                logger.error("  Futures order failed: %s", e)
+                self.pm.finalize_close()
+                return None
+
             futures_order_id = futures_result.get("orderId", "")
-            logger.info("  Leg 1: SHORT placed — order %s", futures_order_id)
+            logger.info("  Leg 1: SHORT filled — order %s", futures_order_id)
 
-            # Brief wait for limit fill
-            await asyncio.sleep(3)
-
-            # 4. Buy spot — limit at ask price (maker)
+            # 4. Buy spot — try limit at ask (maker fee), fallback to market
             from core.models import OrderSide
             spot_ask = spot_ticker.ask if spot_ticker.ask > 0 else current_price
-            logger.info("  Leg 2: BUY %.0f %s spot (LIMIT @ %.6f, ~$%.2f)...",
-                        spot_qty, opp.base_asset, spot_ask, spot_qty * current_price)
 
-            spot_order = await self.spot.place_order(
-                symbol=opp.base_asset + "USDT",
-                side=OrderSide.BUY,
-                quantity=spot_qty,
-                price=spot_ask,  # Limit order at ask = likely fills as maker
-            )
+            logger.info("  Leg 2: BUY %.0f %s spot (~$%.2f)...",
+                        spot_qty, opp.base_asset, spot_qty * current_price)
+
+            try:
+                spot_order = await self.spot.place_order(
+                    symbol=opp.base_asset + "USDT",
+                    side=OrderSide.BUY,
+                    quantity=spot_qty,
+                    price=spot_ask,
+                )
+            except Exception:
+                logger.warning("  Limit spot failed, using market order")
+                spot_order = await self.spot.place_order(
+                    symbol=opp.base_asset + "USDT",
+                    side=OrderSide.BUY,
+                    quantity=spot_qty,
+                )
 
             if spot_order.status.value != "FILLED":
                 logger.error("  Leg 2: SPOT BUY FAILED — closing futures...")
