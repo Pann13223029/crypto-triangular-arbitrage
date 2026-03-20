@@ -130,12 +130,16 @@ class FundingPositionManager:
         return self.active_position
 
     def finalize_close(self) -> None:
-        """Move active position to closed list."""
+        """Move active position to closed list and sync totals."""
         if self.active_position is None:
             return
-        self.active_position.status = PositionStatus.CLOSED
-        self.closed_positions.append(self.active_position)
+        pos = self.active_position
+        pos.status = PositionStatus.CLOSED
+        self.closed_positions.append(pos)
         self.total_exits += 1
+        # Sync totals from position (handles both fresh and restored positions)
+        self.total_funding_collected = sum(p.funding_collected for p in self.closed_positions)
+        self.total_fees_paid = sum(p.total_fees for p in self.closed_positions)
         logger.info(
             "Position closed: %s | Funding: $%.4f | Fees: $%.4f | Net: $%.4f | Held: %.1fh",
             self.active_position.symbol,
