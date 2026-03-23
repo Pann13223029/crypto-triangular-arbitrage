@@ -37,7 +37,9 @@ graph LR
 |----------|--------|--------|
 | Triangular arb | Built & tested | Market too efficient for retail (0.008% spread vs 0.225% fees) |
 | Cross-exchange arb | Built & tested | Inventory risk: tokens drop 10-42% while holding, wiping arb profit |
-| **Funding rate arb** | **Active** | **Delta-neutral: no directional risk, collect funding every 8h** |
+| **Funding rate arb** | **Live tested** | **2 trades executed. +$0.038 on GF, -$0.014 on TRUTH. Negative EV at $30 — viable at $500+** |
+| Stablecoin depeg | Monitor ready | Continuous monitoring of USDT/USDC/DAI/FDUSD across CEX |
+| DEX-CEX arb | Scanner ready | DexScreener + GoPlus safety check. Alert-only (Phase 1) |
 
 ## Funding Rate Arbitrage
 
@@ -79,7 +81,7 @@ sequenceDiagram
 2. **Human approves** entry (or auto-enter on strong signals)
 3. **Executor** simultaneously buys spot + shorts futures = delta-neutral
 4. **Every 8 hours**, longs pay shorts → you collect funding
-5. **Auto-exit** when funding drops below 0.05% or after 24h max hold
+5. **Dynamic exit**: after 2 payments or when rate drops below 0.12%
 
 ### Current Opportunities (live scan)
 
@@ -102,7 +104,9 @@ SUPRAUSDTM        0.2317%/8h  break-even: 8h   *** YES ***
 | **Isolated margin** | Only position margin at risk, not whole account |
 | **2x leverage max** | Survives 45% adverse move before liquidation |
 | **Exchange stop-loss** | -15% on exchange (works even if bot crashes) |
-| **Auto-exit** | Funding < 0.05%, or 24h max hold, or 1.5% basis divergence |
+| **98%+ hedge ratio** | Enforced before entry — rejects if can't fully hedge |
+| **Dynamic 2-payment exit** | Exit after 2 payments if rate < 0.18%, or rate < 0.12% anytime |
+| **Rate consistency** | Requires 2+ scans above threshold before entry |
 | **State persistence** | JSON state file survives crashes, reconciles on startup |
 | **Orphan detection** | Alerts (never auto-closes) if one leg is missing |
 
@@ -203,18 +207,48 @@ python main.py --mode simulation --duration 120
 ├── dashboard/               # Rich CLI monitor
 ├── data/                    # SQLite logging, price cache
 ├── backtest/                # Data recorder & replayer
+├── stable_arb/              # Stablecoin depeg monitor
+│   ├── detector.py          # Threshold + 3-tick confirmation
+│   ├── price_aggregator.py  # Multi-source CEX price collector
+│   ├── alert_manager.py     # Terminal + sound alerts by severity
+│   └── main_loop.py         # Continuous monitoring loop
+│
+├── dex_arb/                 # DEX-CEX arbitrage scanner
+│   ├── dex_price_feed.py    # DexScreener REST API
+│   ├── token_safety.py      # GoPlus honeypot detection
+│   └── scanner.py           # Cross-venue spread detection
+│
 ├── tools/                   # Diagnostic scripts
 │   ├── check_readiness.py   # Pre-trade readiness check
+│   ├── monte_carlo.py       # Strategy simulation (10K paths)
 │   ├── scan_cross_exchange.py
 │   └── scan_profitability.py
-├── tests/                   # 147 tests
+├── tests/                   # 170 tests
 └── config/                  # Dataclass-based configuration
 ```
+
+## Live Trade Results
+
+| # | Token | Duration | Funding | Fees | Net P&L | Hedge | Issue |
+|---|-------|----------|---------|------|---------|-------|-------|
+| 1 | GF | 4.4h | +$0.072 | -$0.034 | **+$0.038** | 35% | Mismatch (fixed) |
+| 2 | TRUTH | 2.4h | $0.000 | -$0.014 | **-$0.014** | 100% | Rate decayed before collection |
+
+Key learnings: hedge ratio enforcement critical, rates decay 50-70% in 4h on micro-caps, entry threshold raised to 0.25%.
+
+## Monte Carlo Simulation
+
+```bash
+python tools/monte_carlo.py --capital 30 --months 6 --sims 10000
+```
+
+At $30 capital, funding rate arb has **negative expected value** due to fee drag. Strategy becomes viable at **$500+** with maker fees. Current focus: learning + infrastructure for scaling.
 
 ## Architecture Documents
 
 - [architecture.md](architecture.md) — Triangular arb design (10-expert panel)
 - [architecture-cross-exchange.md](architecture-cross-exchange.md) — Cross-exchange design (9-expert panel)
+- [architecture-dex-stable.md](architecture-dex-stable.md) — DEX-CEX arb + stablecoin depeg monitor (5-expert panel)
 
 ## Exchange Support
 
@@ -231,14 +265,17 @@ python main.py --mode simulation --duration 120
 Key parameters in `config/settings.py` and `funding_arb/main_loop.py`:
 
 ```yaml
-# Funding Rate Arb
+# Funding Rate Arb (post live-trade tuning)
 leverage:           2x (isolated margin)
 stop_loss:          -15% on exchange
-min_funding_rate:   0.10% per 8h to enter
-exit_funding_rate:  0.05% per 8h to exit
-max_hold:           24 hours
+min_funding_rate:   0.25% per 8h to enter (accounts for decay + fees)
+exit_funding_rate:  0.12% per 8h to exit
+stay_threshold:     0.18% (only stay for 3rd payment if above this)
+max_hold:           32 hours
 basis_stop_loss:    1.5% divergence
-entry_window:       T-2h before funding (00:00, 08:00, 16:00 UTC)
+hedge_enforcement:  98%+ or reject trade
+entry_mode:         immediate (no window waiting)
+rate_consistency:   2+ scans above threshold required
 approval:           human (5min timeout)
 
 # Cross-Exchange Arb
@@ -252,7 +289,7 @@ anomaly_filter:     >5% rejected
 
 ```bash
 python -m pytest tests/ -v
-# 147 tests passing
+# 170 tests passing
 ```
 
 ## Disclaimer

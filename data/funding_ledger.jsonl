@@ -1,1 +1,2 @@
 {"symbol": "GFUSDTM", "base_asset": "GF", "entry_rate": 0.00407, "held_hours": 4.4, "funding_collected": 0.071494, "total_fees": 0.03376, "net_pnl": 0.037735, "funding_periods": 1, "exit_reason": "Funding normalized to 0.1076%", "closed_at": "2026-03-19T18:05:53.891504+00:00"}
+{"symbol": "TRUTHUSDTM", "base_asset": "TRUTH", "entry_rate": 0.003, "held_hours": 2.4, "funding_collected": 0, "total_fees": 0.013768, "net_pnl": -0.013768, "funding_periods": 0, "exit_reason": "Funding normalized to 0.1193%", "closed_at": "2026-03-20T04:49:32.569683+00:00"}
