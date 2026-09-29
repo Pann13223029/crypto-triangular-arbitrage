@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="240" viewBox="0 0 960 240" role="img" aria-labelledby="title desc">
+  <!-- Light version for the README. docs/funding-cycle-dark.svg is the same drawing in dark colors: keep the two in sync. -->
+  <title id="title">How the funding-rate bot runs a position</title>
+  <desc id="desc">Five steps in a loop. 1. Scan: every 15 minutes, look for a funding rate of 0.25 to 3 percent per 8 hours. 2. Approve: you type y or n in the terminal, with a 5-minute timeout; n or no answer goes back to scanning. 3. Enter: short the perpetual, buy the matching spot, and place a stop order at plus 15 percent. 4. Hold: funding is paid every 8 hours, and the bot checks the position every 5 minutes. 5. Exit: close the short and sell the spot when an exit rule fires, then scan again.</desc>
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif; }
+    .canvas { fill: #ffffff; }
+    .panel { fill: #f6f8fa; stroke: #d0d7de; }
+    .ink { fill: #1f2328; }
+    .mut { fill: #59636e; }
+    .line { fill: none; stroke: #8c959f; stroke-width: 1.5; }
+    .head { fill: #8c959f; }
+    .step { fill: #1a7f37; }
+    .onstep { fill: #ffffff; }
+  </style>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto">
+      <path class="head" d="M0,1 L10,5 L0,9 z"/>
+    </marker>
+  </defs>
+  <rect class="canvas" width="960" height="240" rx="12"/>
+
+  <!-- Loops back to scanning -->
+  <path class="line" d="M288,51.5 V30.5 H96 V50" marker-end="url(#arrow)"/>
+  <text x="192" y="24" text-anchor="middle" font-size="12.5" class="mut">n or no answer: scan again</text>
+  <path class="line" d="M864,176.5 V200.5 H96 V178" marker-end="url(#arrow)"/>
+  <text x="480" y="221" text-anchor="middle" font-size="12.5" class="mut">then scan again</text>
+
+  <!-- 1 Scan -->
+  <rect class="panel" x="13.5" y="52.5" width="165" height="124" rx="12"/>
+  <circle class="step" cx="40" cy="81" r="12"/>
+  <text x="40" y="85.5" text-anchor="middle" font-size="12.5" font-weight="700" class="onstep">1</text>
+  <text x="60" y="87" font-size="16" font-weight="600" class="ink">Scan</text>
+  <text x="28" y="116" font-size="13.5" class="ink">Every 15 minutes,</text>
+  <text x="28" y="135" font-size="13.5" class="ink">looks for a rate of</text>
+  <text x="28" y="154" font-size="13.5" class="ink">0.25–3% per 8 hours</text>
+  <path class="line" d="M183,114.5 H201" marker-end="url(#arrow)"/>
+
+  <!-- 2 Approve -->
+  <rect class="panel" x="205.5" y="52.5" width="165" height="124" rx="12"/>
+  <circle class="step" cx="232" cy="81" r="12"/>
+  <text x="232" y="85.5" text-anchor="middle" font-size="12.5" font-weight="700" class="onstep">2</text>
+  <text x="252" y="87" font-size="16" font-weight="600" class="ink">Approve</text>
+  <text x="220" y="116" font-size="13.5" class="ink">You type y or n</text>
+  <text x="220" y="135" font-size="13.5" class="ink">in the terminal</text>
+  <text x="220" y="154" font-size="13.5" class="ink">5-minute timeout</text>
+  <path class="line" d="M375,114.5 H393" marker-end="url(#arrow)"/>
+  <text x="384" y="106" text-anchor="middle" font-size="13" class="mut">y</text>
+
+  <!-- 3 Enter -->
+  <rect class="panel" x="397.5" y="52.5" width="165" height="124" rx="12"/>
+  <circle class="step" cx="424" cy="81" r="12"/>
+  <text x="424" y="85.5" text-anchor="middle" font-size="12.5" font-weight="700" class="onstep">3</text>
+  <text x="444" y="87" font-size="16" font-weight="600" class="ink">Enter</text>
+  <text x="412" y="116" font-size="13.5" class="ink">Short perpetual,</text>
+  <text x="412" y="135" font-size="13.5" class="ink">buy matching spot,</text>
+  <text x="412" y="154" font-size="13.5" class="ink">stop order at +15%</text>
+  <path class="line" d="M567,114.5 H585" marker-end="url(#arrow)"/>
+
+  <!-- 4 Hold -->
+  <rect class="panel" x="589.5" y="52.5" width="165" height="124" rx="12"/>
+  <circle class="step" cx="616" cy="81" r="12"/>
+  <text x="616" y="85.5" text-anchor="middle" font-size="12.5" font-weight="700" class="onstep">4</text>
+  <text x="636" y="87" font-size="16" font-weight="600" class="ink">Hold</text>
+  <text x="604" y="116" font-size="13.5" class="ink">Funding paid every</text>
+  <text x="604" y="135" font-size="13.5" class="ink">8 hours; checks</text>
+  <text x="604" y="154" font-size="13.5" class="ink">every 5 minutes</text>
+  <path class="line" d="M759,114.5 H777" marker-end="url(#arrow)"/>
+
+  <!-- 5 Exit -->
+  <rect class="panel" x="781.5" y="52.5" width="165" height="124" rx="12"/>
+  <circle class="step" cx="808" cy="81" r="12"/>
+  <text x="808" y="85.5" text-anchor="middle" font-size="12.5" font-weight="700" class="onstep">5</text>
+  <text x="828" y="87" font-size="16" font-weight="600" class="ink">Exit</text>
+  <text x="796" y="116" font-size="13.5" class="ink">Close the short,</text>
+  <text x="796" y="135" font-size="13.5" class="ink">sell the spot when</text>
+  <text x="796" y="154" font-size="13.5" class="ink">an exit rule fires</text>
+</svg>

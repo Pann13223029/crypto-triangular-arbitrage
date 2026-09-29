@@ -6,7 +6,10 @@ Python 3.10+ · asyncio · aiohttp (REST and WebSocket) · NumPy · SQLite · py
 
 A Python prototype, built in March 2026, that tests crypto arbitrage strategies and watches for opportunities across five exchanges. Five approaches were built and tested in turn. The first two were paper-traded on real market data, then dropped. The third, **funding-rate arbitrage**, became the main design: a hedged bot for KuCoin that asks a person before every trade, with its risk rules in code. The last two only watch the market and send alerts.
 
-![Three strategies side by side. Triangular arbitrage, three trades on one exchange: paper-traded, then dropped, because three fees of about 0.225% cost more than any price gap found on Binance. Cross-exchange arbitrage, buying on one exchange and selling on another: paper-traded, then dropped, because the tokens held for the trade fell 10–42%. Funding-rate arbitrage, buying spot and shorting the perpetual to collect funding every 8 hours: the main design, tried live with two small positions.](docs/strategies.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/strategies-dark.svg">
+  <img alt="Three strategies side by side. Triangular arbitrage, three trades on one exchange: paper-traded, then dropped, because three fees of about 0.225% cost more than any price gap found on Binance. Cross-exchange arbitrage, buying on one exchange and selling on another: paper-traded, then dropped, because the tokens held for the trade fell 10–42%. Funding-rate arbitrage, buying spot and shorting the perpetual to collect funding every 8 hours: the main design, tried live with two small positions." src="docs/strategies-light.svg">
+</picture>
 
 ## The five approaches
 
@@ -22,7 +25,10 @@ A Python prototype, built in March 2026, that tests crypto arbitrage strategies 
 
 Perpetual futures never expire, so exchanges keep their price close to the spot price with a **funding rate**: every 8 hours, one side pays the other. When the rate is positive, longs pay shorts. Holding a token in spot while shorting the same amount in the perpetual hedges the price, since a gain on one leg is a loss on the other, and the short side collects the payment. The hard part is everything around that: fees, rates that fade within hours, one leg of the trade failing, and contract sizes that don't fit the budget.
 
-![Five steps in a loop. Scan every 15 minutes for a rate of 0.25–3% per 8 hours. A person approves with y or n, with a 5-minute timeout. Enter by shorting the perpetual, buying matching spot and placing a stop order at +15%. Hold while funding is paid every 8 hours and the bot checks every 5 minutes. Exit when a rule fires, then scan again.](docs/funding-cycle.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/funding-cycle-dark.svg">
+  <img alt="Five steps in a loop. Scan every 15 minutes for a rate of 0.25–3% per 8 hours. A person approves with y or n, with a 5-minute timeout. Enter by shorting the perpetual, buying matching spot and placing a stop order at +15%. Hold while funding is paid every 8 hours and the bot checks every 5 minutes. Exit when a rule fires, then scan again." src="docs/funding-cycle-light.svg">
+</picture>
 
 **Entry.** Every 15 minutes the scanner reads the funding rate of every USDT perpetual on KuCoin. A contract qualifies when longs pay, the rate is between 0.25% and 3% per 8 hours (anything higher is treated as bad data), and the exchange's predicted next rate isn't negative. From the second scan on, the bot prefers contracts whose rate was also high on the scan before. Once a person approves, it sizes the short in whole contract lots and buys exactly that amount in spot, and it refuses the trade if one lot costs more than the spot budget or if rounding leaves the hedge under 95%. The short goes first as a market order; the spot buy tries a limit order at the ask, then a market order. If the spot leg fails, the short is closed at once. Last, a stop order goes on the short at +15%.
 
