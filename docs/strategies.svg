@@ -1,0 +1,123 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="432" viewBox="0 0 960 432" role="img" aria-labelledby="title desc">
+  <title id="title">Three arbitrage strategies, tried in order</title>
+  <desc id="desc">1. Triangular arbitrage: three trades on one exchange, USDT to BTC to ETH and back to USDT. Paper-traded, then dropped: three fees of about 0.225% cost more than any price gap found on Binance. 2. Cross-exchange arbitrage: buy lower on exchange A, sell higher on exchange B. Paper-traded, then dropped: tokens held for the trade fell 10 to 42 percent, far more than the spreads could earn. 3. Funding-rate arbitrage: buy spot and short the perpetual future in the same size, so price moves cancel out, and collect the funding paid to shorts every 8 hours. The main design: hedged, human-approved, tried live with two small positions. Also in the repository: a stablecoin depeg monitor and a DEX-CEX scanner, which send alerts only.</desc>
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif; }
+    .mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace; }
+    .panel { fill: #f6f8fa; stroke: #d0d7de; }
+    .main { fill: #1a7f37; fill-opacity: .06; stroke: #1a7f37; stroke-width: 1.5; }
+    .box { fill: #ffffff; stroke: #d0d7de; }
+    .ink { fill: #1f2328; }
+    .mut { fill: #59636e; }
+    .acc { fill: #1a7f37; }
+    .line { fill: none; stroke: #8c959f; stroke-width: 1.5; }
+    .head { fill: #8c959f; }
+    .accline { fill: none; stroke: #1a7f37; stroke-width: 2; }
+    .rule { fill: none; stroke: #d0d7de; }
+    .risk { fill: none; stroke: #cf222e; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+    .riskdot { fill: #cf222e; }
+    .chip { fill: #eaeef2; }
+    .chipmain { fill: #1a7f37; }
+    .onchip { fill: #ffffff; }
+    .usdt { fill: #26a17b; fill-opacity: .12; stroke: #26a17b; stroke-width: 2; }
+    .btc { fill: #f7931a; fill-opacity: .12; stroke: #e8830c; stroke-width: 2; }
+    .eth { fill: #627eea; fill-opacity: .12; stroke: #627eea; stroke-width: 2; }
+    @media (prefers-color-scheme: dark) {
+      .panel { fill: #161b22; stroke: #30363d; }
+      .main { fill: #2ea043; fill-opacity: .1; stroke: #2ea043; }
+      .box { fill: #0d1117; stroke: #3d444d; }
+      .ink { fill: #e6edf3; }
+      .mut { fill: #9198a1; }
+      .acc { fill: #3fb950; }
+      .line { stroke: #7d8590; }
+      .head { fill: #7d8590; }
+      .accline { stroke: #3fb950; }
+      .rule { stroke: #30363d; }
+      .risk { stroke: #f85149; }
+      .riskdot { fill: #f85149; }
+      .chip { fill: #262c36; }
+      .chipmain { fill: #238636; }
+      .eth { fill: #8a9ff0; stroke: #8a9ff0; }
+    }
+  </style>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto">
+      <path class="head" d="M0,1 L10,5 L0,9 z"/>
+    </marker>
+    <marker id="arrow-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="10" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto">
+      <path class="acc" d="M0,1 L10,5 L0,9 z"/>
+    </marker>
+  </defs>
+
+  <!-- 01 Triangular -->
+  <rect class="panel" x="12.5" y="12.5" width="296" height="356" rx="12"/>
+  <text x="32" y="42" font-size="13" class="mut"><tspan class="mono">01</tspan> · one exchange</text>
+  <text x="32" y="69" font-size="18" font-weight="600" class="ink">Triangular arbitrage</text>
+  <path class="line" d="M176.1,139.6 L205.9,190.9" marker-end="url(#arrow)"/>
+  <path class="line" d="M192,222 L132,222" marker-end="url(#arrow)"/>
+  <path class="line" d="M112.1,194.4 L141.9,143.1" marker-end="url(#arrow)"/>
+  <circle class="usdt" cx="160" cy="112" r="26"/>
+  <circle class="btc" cx="224" cy="222" r="26"/>
+  <circle class="eth" cx="96" cy="222" r="26"/>
+  <text x="160" y="116.5" text-anchor="middle" font-size="12" font-weight="700" class="mono ink">USDT</text>
+  <text x="224" y="226.5" text-anchor="middle" font-size="12" font-weight="700" class="mono ink">BTC</text>
+  <text x="96" y="226.5" text-anchor="middle" font-size="12" font-weight="700" class="mono ink">ETH</text>
+  <text x="160" y="185" text-anchor="middle" font-size="13.5" font-weight="600" class="ink">3 trades</text>
+  <text x="160" y="201.5" text-anchor="middle" font-size="12.5" class="mut">3 fees</text>
+  <path class="rule" d="M32,262.5 H288"/>
+  <rect class="chip" x="32" y="278" width="212" height="24" rx="12"/>
+  <text x="138" y="294.5" text-anchor="middle" font-size="12.5" font-weight="600" class="mut">Paper-traded, then dropped</text>
+  <text x="32" y="327" font-size="13.5" class="ink">Three fees (≈0.225%) cost more than</text>
+  <text x="32" y="347" font-size="13.5" class="ink">any price gap found on Binance.</text>
+
+  <path class="line" d="M316,182 L323,190 L316,198"/>
+
+  <!-- 02 Cross-exchange -->
+  <rect class="panel" x="332.5" y="12.5" width="296" height="356" rx="12"/>
+  <text x="352" y="42" font-size="13" class="mut"><tspan class="mono">02</tspan> · two exchanges</text>
+  <text x="352" y="69" font-size="18" font-weight="600" class="ink">Cross-exchange arbitrage</text>
+  <rect class="box" x="352.5" y="100.5" width="100" height="56" rx="10"/>
+  <text x="402.5" y="124" text-anchor="middle" font-size="13.5" font-weight="600" class="ink">Exchange A</text>
+  <text x="402.5" y="143" text-anchor="middle" font-size="12.5" class="mut">buy lower</text>
+  <rect class="box" x="508.5" y="100.5" width="100" height="56" rx="10"/>
+  <text x="558.5" y="124" text-anchor="middle" font-size="13.5" font-weight="600" class="ink">Exchange B</text>
+  <text x="558.5" y="143" text-anchor="middle" font-size="12.5" class="mut">sell higher</text>
+  <path class="line" d="M459,128.5 H503" marker-end="url(#arrow)"/>
+  <text x="480.5" y="120" text-anchor="middle" font-size="12" class="mut">spread</text>
+  <path class="rule" stroke-dasharray="3 4" d="M404,182.5 H556"/>
+  <polyline class="risk" points="404,182 418,187 431,181 445,194 459,190 473,203 487,199 501,212 515,208 529,220 543,217 556,228"/>
+  <circle class="riskdot" cx="556" cy="228" r="3.5"/>
+  <text x="480.5" y="249" text-anchor="middle" font-size="12.5" class="mut">price of the tokens held for the trade</text>
+  <path class="rule" d="M352,262.5 H608"/>
+  <rect class="chip" x="352" y="278" width="212" height="24" rx="12"/>
+  <text x="458" y="294.5" text-anchor="middle" font-size="12.5" font-weight="600" class="mut">Paper-traded, then dropped</text>
+  <text x="352" y="327" font-size="13.5" class="ink">Held tokens fell 10–42%, far more</text>
+  <text x="352" y="347" font-size="13.5" class="ink">than the spreads could earn.</text>
+
+  <path class="line" d="M636,182 L643,190 L636,198"/>
+
+  <!-- 03 Funding rate (main design) -->
+  <rect class="main" x="652.75" y="12.75" width="295.5" height="355.5" rx="12"/>
+  <text x="672" y="42" font-size="13" class="acc"><tspan class="mono">03</tspan> · spot + perpetual</text>
+  <text x="672" y="69" font-size="18" font-weight="600" class="ink">Funding-rate arbitrage</text>
+  <rect class="box" x="672.5" y="98.5" width="188" height="38" rx="10"/>
+  <text x="688" y="122.5" font-size="13.5" font-weight="600" class="ink">Buy spot</text>
+  <text x="846" y="123" text-anchor="end" font-size="15" font-weight="700" class="mono acc">+1</text>
+  <rect class="box" x="672.5" y="146.5" width="188" height="38" rx="10"/>
+  <text x="688" y="170.5" font-size="13.5" font-weight="600" class="ink">Short perpetual</text>
+  <text x="846" y="171" text-anchor="end" font-size="15" font-weight="700" class="mono acc">−1</text>
+  <path class="line" d="M868,100 Q874,100 874,106 L874,135.5 Q874,141.5 880,141.5 Q874,141.5 874,147.5 L874,177 Q874,183 868,183"/>
+  <text x="886" y="146.5" font-size="17" font-weight="700" class="mono acc">≈ 0</text>
+  <text x="886" y="163" font-size="11.5" class="mut">exposure</text>
+  <path class="accline" d="M766.5,228 V191" marker-end="url(#arrow-acc)"/>
+  <text x="766.5" y="247" text-anchor="middle" font-size="12.5" class="ink">funding to shorts, every 8 h</text>
+  <path class="rule" d="M672,262.5 H928"/>
+  <rect class="chipmain" x="672" y="278" width="104" height="24" rx="12"/>
+  <text x="724" y="294.5" text-anchor="middle" font-size="12.5" font-weight="600" class="onchip">Main design</text>
+  <text x="672" y="327" font-size="13.5" class="ink">Hedged and human-approved; tried</text>
+  <text x="672" y="347" font-size="13.5" class="ink">live with two small positions.</text>
+
+  <!-- Monitors -->
+  <rect class="panel" x="12.5" y="384.5" width="935" height="36" rx="10"/>
+  <text x="480" y="407.5" text-anchor="middle" font-size="13.5" class="mut"><tspan class="ink" font-weight="600">Also in the repo:</tspan> a stablecoin depeg monitor and a DEX–CEX scanner, which send alerts only</text>
+</svg>

@@ -1,301 +1,164 @@
-# Crypto Arbitrage Trading System
+# Crypto arbitrage research and monitoring system
 
-A Python-based arbitrage system supporting three strategies:
+Pann Phetra · [github.com/Pann13223029](https://github.com/Pann13223029)
 
-1. **Triangular Arbitrage** — 3-pair cycles on single exchange
-2. **Cross-Exchange Arbitrage** — buy low on one exchange, sell high on another
-3. **Funding Rate Arbitrage** — delta-neutral, collect funding payments (active strategy)
+Python 3.10+ · asyncio · aiohttp (REST and WebSocket) · NumPy · SQLite · pytest
 
-```mermaid
-graph LR
-    subgraph FundingArb["Funding Rate Arb (active)"]
-        SPOT["Long Spot"]
-        PERP["Short Perp"]
-        FUND["Collect Funding<br/>Every 8 Hours"]
-        SPOT --- PERP
-        PERP -->|"delta neutral"| FUND
-    end
+A Python prototype, built in March 2026, that tests crypto arbitrage strategies and watches for opportunities across five exchanges. Five approaches were built and tested in turn. The first two were paper-traded on real market data, then dropped. The third, **funding-rate arbitrage**, became the main design: a hedged bot for KuCoin that asks a person before every trade, with its risk rules in code. The last two only watch the market and send alerts.
 
-    subgraph CrossArb["Cross-Exchange Arb"]
-        KC["Exchange A<br/>Buy cheap"]
-        BN["Exchange B<br/>Sell high"]
-        KC -->|"spread"| BN
-    end
+![Three strategies side by side. Triangular arbitrage, three trades on one exchange: paper-traded, then dropped, because three fees of about 0.225% cost more than any price gap found on Binance. Cross-exchange arbitrage, buying on one exchange and selling on another: paper-traded, then dropped, because the tokens held for the trade fell 10–42%. Funding-rate arbitrage, buying spot and shorting the perpetual to collect funding every 8 hours: the main design, tried live with two small positions.](docs/strategies.svg)
 
-    subgraph TriArb["Triangular Arb"]
-        A["USDT"] --> B["BTC"] --> C["ETH"] --> A
-    end
+## The five approaches
 
-    style FundingArb fill:#22c55e,stroke:#16a34a,color:#fff
-    style CrossArb fill:#1e293b,stroke:#334155,color:#fff
-    style TriArb fill:#1e293b,stroke:#334155,color:#fff
-```
+| # | Strategy | How it works | Status |
+|---|---|---|---|
+| 1 | Triangular arbitrage | Three trades on one exchange that end in the starting coin, such as USDT → BTC → ETH → USDT | **Paper-traded, then dropped.** Each cycle pays three taker fees, about 0.225% at 0.075% each, and even the best triangle found on live Binance prices lost money after fees. |
+| 2 | Cross-exchange arbitrage | Buy a token where it's cheaper and sell it where it's dearer | **Paper-traded, then dropped.** Gaps on liquid pairs were tiny (0.008% on BTC between Bybit and OKX). Mid-cap tokens had gaps of 0.2–3%, but the bot has to keep a stock of them on the selling exchange, and in paper trading they fell 10–42% while held. |
+| 3 | Funding-rate arbitrage | Hold a token in spot, short the same amount in a perpetual future, and collect the funding paid every 8 hours | **Main design.** Tried live with two small positions on KuCoin; see [the live test](#live-test) below. |
+| 4 | Stablecoin depeg monitor | Watches USDT, USDC, DAI, FDUSD and TUSD on KuCoin and Binance over WebSocket | **Alert-only.** Flags a move of 0.3% or more from $1 that holds for 3 ticks within a minute, graded from mild to crisis (5% or more). |
+| 5 | DEX–CEX scanner | Compares DexScreener prices with exchange prices and screens each token with GoPlus first | **Alert-only.** A module with tests; not wired to a command yet. |
 
-## Strategy Evolution
+## Funding-rate arbitrage
 
-| Strategy | Status | Result |
-|----------|--------|--------|
-| Triangular arb | Built & tested | Market too efficient for retail (0.008% spread vs 0.225% fees) |
-| Cross-exchange arb | Built & tested | Inventory risk: tokens drop 10-42% while holding, wiping arb profit |
-| **Funding rate arb** | **Live tested** | **2 trades executed. +$0.038 on GF, -$0.014 on TRUTH. Negative EV at $30 — viable at $500+** |
-| Stablecoin depeg | Monitor ready | Continuous monitoring of USDT/USDC/DAI/FDUSD across CEX |
-| DEX-CEX arb | Scanner ready | DexScreener + GoPlus safety check. Alert-only (Phase 1) |
+Perpetual futures never expire, so exchanges keep their price close to the spot price with a **funding rate**: every 8 hours, one side pays the other. When the rate is positive, longs pay shorts. Holding a token in spot while shorting the same amount in the perpetual hedges the price, since a gain on one leg is a loss on the other, and the short side collects the payment. The hard part is everything around that: fees, rates that fade within hours, one leg of the trade failing, and contract sizes that don't fit the budget.
 
-## Funding Rate Arbitrage
+![Five steps in a loop. Scan every 15 minutes for a rate of 0.25–3% per 8 hours. A person approves with y or n, with a 5-minute timeout. Enter by shorting the perpetual, buying matching spot and placing a stop order at +15%. Hold while funding is paid every 8 hours and the bot checks every 5 minutes. Exit when a rule fires, then scan again.](docs/funding-cycle.svg)
 
-The active strategy. Earns income by exploiting funding rate differences on perpetual futures.
+**Entry.** Every 15 minutes the scanner reads the funding rate of every USDT perpetual on KuCoin. A contract qualifies when longs pay, the rate is between 0.25% and 3% per 8 hours (anything higher is treated as bad data), and the exchange's predicted next rate isn't negative. From the second scan on, the bot prefers contracts whose rate was also high on the scan before. Once a person approves, it sizes the short in whole contract lots and buys exactly that amount in spot, and it refuses the trade if one lot costs more than the spot budget or if rounding leaves the hedge under 95%. The short goes first as a market order; the spot buy tries a limit order at the ask, then a market order. If the spot leg fails, the short is closed at once. Last, a stop order goes on the short at +15%.
 
-```mermaid
-sequenceDiagram
-    participant S as Scanner
-    participant H as Human
-    participant E as Executor
-    participant KC as KuCoin
+**Exit.** At each check (every 5 minutes), the bot closes the short and sells the spot it actually holds if one of these is true:
 
-    S->>S: Scan 550 perps every 8h
-    S->>H: "LRC at 0.37%/8h — Enter? [y/n]"
-    H->>E: Approve (y)
+- the rate drops below 0.12% per 8 hours (if the next payment is less than 10 minutes away, it waits for it first);
+- two payments are in and the rate is below 0.18%;
+- three payments are in;
+- the position is 32 hours old;
+- the spot and perpetual prices are more than 1.5% apart.
 
-    par Simultaneous entry
-        E->>KC: Buy LRC spot
-        E->>KC: Short LRCUSDTM perp
-    end
-    E->>KC: Set -15% stop-loss
+### Risk controls
 
-    loop Every 8 hours
-        KC-->>E: Funding payment received
-        E->>E: Check: rate still > 0.05%?
-    end
+| Control | What it does |
+|---|---|
+| Hedged position | Spot and perpetual in the same size, so a price move hits the two legs in opposite directions |
+| Hedge check | Futures sized in whole lots first and spot matched to them; no trade below a 95% hedge |
+| Isolated margin, 2x leverage | The futures leg is backed by its own margin, not by the whole account |
+| Stop order on the exchange | A stop order on the short at +15%, held by the exchange rather than by the bot |
+| A person approves each entry | A "y" at the terminal, with a 5-minute timeout. An auto-enter switch exists; it's off by default |
+| Failed legs | If the spot buy fails, the short is closed at once. If an exit fails, the bot stops and raises an alert |
+| State file | The open position is saved to a JSON file and checked against the exchange on start; the bot resumes if the two match |
+| Orphan alerts | A position on the exchange with no matching state raises an alert, and the bot won't start until it's sorted out by hand; it doesn't close anything itself |
 
-    Note over E: Rate drops below 0.05%
-    par Exit
-        E->>KC: Close short (buy to cover)
-        E->>KC: Sell spot
-    end
-    E->>H: "Position closed. Net: +$0.27"
-```
+### Live test
 
-### How It Works
+In March 2026 the bot ran on KuCoin with a $30 account and took two small positions:
 
-1. **Scanner** finds perpetual contracts with high funding rates (>0.10%/8h)
-2. **Human approves** entry (or auto-enter on strong signals)
-3. **Executor** simultaneously buys spot + shorts futures = delta-neutral
-4. **Every 8 hours**, longs pay shorts → you collect funding
-5. **Dynamic exit**: after 2 payments or when rate drops below 0.12%
+| Trade | Entry rate (per 8 h) | Held | Hedge | Funding ($) | Fees ($) | Net ($) | Why it closed |
+|---|---|---|---|---|---|---|---|
+| GF | 0.41% | 4.4&nbsp;h | 35% | +0.072 | −0.034 | **+0.038** | The rate fell to 0.11% |
+| TRUTH | 0.30% | 2.4&nbsp;h | 100% | 0.000 | −0.014 | **−0.014** | The rate fell to 0.12% before the first payment |
 
-### Current Opportunities (live scan)
+The Monte Carlo verdict at $30 is a negative expected value. `python tools/monte_carlo.py --capital 30` runs 10,000 six-month paths under the simulator's default assumptions: a 0.20% average entry rate that fades each period, 0.32% in round-trip fees, and a small chance of a liquidation or a stop-out on each trade. The average path loses about 11% of the account, and only about 1 path in 6 ends ahead. Everything in the model scales with the account, so a bigger account alone wouldn't change the verdict; only lower fees, higher rates or fewer forced exits would move it.
+
+### What the live test changed
+
+The two trades turned up four bugs and one wrong assumption. All five fixes are in the code:
+
+1. **Hedge size.** One futures lot of a small token was worth more than the spot budget, so the first position was only 35% hedged. The bot now sizes the futures in whole lots first, matches the spot to them, and refuses trades it can't hedge.
+2. **Exit amount.** The exit tried to sell the planned amount of spot rather than what the account held. It now reads the real balance first.
+3. **Silent restart.** After a restart, the bot went back to monitoring without its position in memory and quietly did nothing. It now rebuilds the position from the state file.
+4. **Futures limit orders.** Switching futures orders to limit orders to save fees failed on some contracts because of tick-size formatting. Futures now use market orders; spot keeps a limit order at the ask with a market fallback.
+5. **Fading rates.** On small tokens, funding rates fell 50–70% within about 4 hours. The entry bar went from 0.10% to 0.25% per 8 hours, and the scanner now checks that a rate holds across scans.
+
+## Engineering
+
+- **Exchange adapters** for KuCoin (spot and futures), Binance, Binance Thailand, OKX and Bybit, written directly against the exchanges' REST and WebSocket APIs with aiohttp and HMAC-SHA256 request signing, behind one `ExchangeBase` interface.
+- **asyncio throughout:** WebSocket price feeds that reconnect on their own, both legs of a cross-exchange trade placed at the same time, and a state machine for the funding-rate bot (idle → scanning → awaiting approval → entering → monitoring → exiting).
+- **Simulation before real money:** a paper-trading exchange, a multi-exchange simulator whose prices drift apart and back (an Ornstein–Uhlenbeck process), and a recorder and replayer for backtests.
+- **Tools:** a terminal dashboard (Rich), a pre-trade readiness check, profitability scans for triangles and cross-exchange spreads, and a Monte Carlo simulator that runs 10,000 six-month paths of the funding-rate strategy under set assumptions about rates, fees and risk events.
+- **170 tests** (pytest) for the profit math, scanners, executors, risk managers, funding logic and timing, depeg detection, the DEX scanner and the simulators.
+
+## Run it
+
+Needs Python 3.10 or later.
 
 ```bash
-python -m funding_arb.cli scan
-```
-
-Example output:
-```
-LRCUSDTM          0.3680%/8h  break-even: 5h   *** YES ***
-VANRYUSDTM        0.2754%/8h  break-even: 7h   *** YES ***
-SUPRAUSDTM        0.2317%/8h  break-even: 8h   *** YES ***
-```
-
-### Safety
-
-| Protection | Detail |
-|-----------|--------|
-| **Delta-neutral** | Long spot + short perp = zero price exposure |
-| **Isolated margin** | Only position margin at risk, not whole account |
-| **2x leverage max** | Survives 45% adverse move before liquidation |
-| **Exchange stop-loss** | -15% on exchange (works even if bot crashes) |
-| **98%+ hedge ratio** | Enforced before entry — rejects if can't fully hedge |
-| **Dynamic 2-payment exit** | Exit after 2 payments if rate < 0.18%, or rate < 0.12% anytime |
-| **Rate consistency** | Requires 2+ scans above threshold before entry |
-| **State persistence** | JSON state file survives crashes, reconciles on startup |
-| **Orphan detection** | Alerts (never auto-closes) if one leg is missing |
-
-## Quick Start
-
-```bash
-# Clone
 git clone https://github.com/Pann13223029/crypto-triangular-arbitrage.git
 cd crypto-triangular-arbitrage
-
-# Setup
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-
-# Configure
-cp .env.example .env
-# Edit .env with KuCoin API key + secret + passphrase
+python -m pytest tests/ -q
 ```
 
-### Funding Rate Arb (recommended)
+These read public market data or simulate trades, so they need no API keys:
 
 ```bash
-# Scan for opportunities
+# Current funding rates on KuCoin
 python -m funding_arb.cli scan
 
-# Run the bot (scans, asks approval, trades, monitors)
-python -m funding_arb.main_loop
-
-# Check readiness (balances, timing, opportunities)
-python tools/check_readiness.py
-```
-
-### Cross-Exchange Arb
-
-```bash
-# Live scan across 4 exchanges (read-only)
-python main.py --live-scan --duration 60 --dry-run
-
-# Simulated cross-exchange trading
-python main.py --cross-exchange --duration 120
-```
-
-### Triangular Arb
-
-```bash
+# Triangular arbitrage: live Binance prices, virtual trades
 python main.py --mode simulation --duration 120
+
+# Cross-exchange arbitrage on simulated exchanges
+python main.py --cross-exchange --duration 120
+
+# Cross-exchange scan: live prices from 4 exchanges, no orders (Ctrl+C to stop)
+python main.py --live-scan --dry-run
+
+# Stablecoin depeg monitor
+python -m stable_arb.main_loop --duration 300
+
+# Monte Carlo options
+python tools/monte_carlo.py --help
 ```
 
-## Project Structure
-
-```
-├── funding_arb/             # Funding rate arbitrage (active strategy)
-│   ├── scanner.py           # Scans 550 KuCoin perps for funding spikes
-│   ├── executor.py          # Enters/exits spot+futures positions
-│   ├── position_manager.py  # Entry/exit logic, risk controls
-│   ├── kucoin_futures.py    # KuCoin Futures API client
-│   ├── main_loop.py         # State machine (IDLE→SCAN→ENTER→MONITOR→EXIT)
-│   ├── timing.py            # Funding timestamp utilities
-│   ├── state.py             # JSON state persistence + JSONL ledger
-│   ├── models.py            # FundingOpportunity, FundingPosition
-│   └── cli.py               # CLI: scan, monitor commands
-│
-├── cross_exchange/          # Cross-exchange arbitrage
-│   ├── book.py              # Aggregated order book across exchanges
-│   ├── scanner.py           # Spread detection with pre-flight filter
-│   ├── executor.py          # Simultaneous orders + emergency hedge
-│   ├── risk_manager.py      # Kill switch, imbalance filtering
-│   ├── balance_tracker.py   # Multi-exchange balance aggregation
-│   ├── pair_manager.py      # Adaptive pair selection (1 active + 4 on-deck)
-│   ├── pair_discovery.py    # Full pair scan across exchanges
-│   └── models.py            # CrossExchangeOpportunity, etc.
-│
-├── core/                    # Triangular arbitrage engine
-│   ├── triangle.py          # Graph-based triangle discovery
-│   ├── scanner.py           # Vectorized opportunity detection
-│   ├── calculator.py        # Numpy profit calculation
-│   └── models.py            # Ticker, OrderBook, Order, etc.
-│
-├── exchange/                # Exchange adapters (6 exchanges)
-│   ├── binance_th.py        # Binance Thailand (live trading)
-│   ├── binance_live.py      # Binance Global (live trading)
-│   ├── binance_ws.py        # Binance WebSocket (bookTicker)
-│   ├── binance_rest.py      # Binance REST
-│   ├── kucoin_rest.py       # KuCoin REST (spot)
-│   ├── kucoin_ws.py         # KuCoin WebSocket
-│   ├── okx_rest.py          # OKX REST
-│   ├── okx_ws.py            # OKX WebSocket
-│   ├── bybit_rest.py        # Bybit REST
-│   ├── bybit_ws.py          # Bybit WebSocket
-│   ├── simulator.py         # Paper trading simulator
-│   ├── multi_sim.py         # Multi-exchange O-U simulator
-│   └── base.py              # Abstract ExchangeBase interface
-│
-├── execution/               # Triangular arb execution
-├── rebalancing/             # Threshold-based + opportunity-aware
-├── monitoring/              # Pipeline metrics, per-symbol P&L
-├── dashboard/               # Rich CLI monitor
-├── data/                    # SQLite logging, price cache
-├── backtest/                # Data recorder & replayer
-├── stable_arb/              # Stablecoin depeg monitor
-│   ├── detector.py          # Threshold + 3-tick confirmation
-│   ├── price_aggregator.py  # Multi-source CEX price collector
-│   ├── alert_manager.py     # Terminal + sound alerts by severity
-│   └── main_loop.py         # Continuous monitoring loop
-│
-├── dex_arb/                 # DEX-CEX arbitrage scanner
-│   ├── dex_price_feed.py    # DexScreener REST API
-│   ├── token_safety.py      # GoPlus honeypot detection
-│   └── scanner.py           # Cross-venue spread detection
-│
-├── tools/                   # Diagnostic scripts
-│   ├── check_readiness.py   # Pre-trade readiness check
-│   ├── monte_carlo.py       # Strategy simulation (10K paths)
-│   ├── scan_cross_exchange.py
-│   └── scan_profitability.py
-├── tests/                   # 170 tests
-└── config/                  # Dataclass-based configuration
-```
-
-## Live Trade Results
-
-| # | Token | Duration | Funding | Fees | Net P&L | Hedge | Issue |
-|---|-------|----------|---------|------|---------|-------|-------|
-| 1 | GF | 4.4h | +$0.072 | -$0.034 | **+$0.038** | 35% | Mismatch (fixed) |
-| 2 | TRUTH | 2.4h | $0.000 | -$0.014 | **-$0.014** | 100% | Rate decayed before collection |
-
-Key learnings: hedge ratio enforcement critical, rates decay 50-70% in 4h on micro-caps, entry threshold raised to 0.25%.
-
-## Monte Carlo Simulation
+The funding-rate bot trades real money. To run it, copy `.env.example` to `.env` and add KuCoin API keys that can trade but not withdraw, limited to your IP address. Then:
 
 ```bash
-python tools/monte_carlo.py --capital 30 --months 6 --sims 10000
+python tools/check_readiness.py    # balances, funding timing and current candidates
+python -m funding_arb.main_loop    # scans, asks for approval, trades and monitors
 ```
 
-At $30 capital, funding rate arb has **negative expected value** due to fee drag. Strategy becomes viable at **$500+** with maker fees. Current focus: learning + infrastructure for scaling.
+Its thresholds, timing, leverage and stop distance are set at the top of `funding_arb/main_loop.py`; the triangular and cross-exchange settings are in `config/settings.py`.
 
-## Architecture Documents
+## Project layout
 
-- [architecture.md](architecture.md) — Triangular arb design (10-expert panel)
-- [architecture-cross-exchange.md](architecture-cross-exchange.md) — Cross-exchange design (9-expert panel)
-- [architecture-dex-stable.md](architecture-dex-stable.md) — DEX-CEX arb + stablecoin depeg monitor (5-expert panel)
-
-## Exchange Support
-
-| Exchange | Spot | Futures | WebSocket | Status |
-|----------|------|---------|-----------|--------|
-| **KuCoin** | REST + WS | REST (futures) | ticker, orderbook | **Active** (funding arb) |
-| **Binance TH** | REST | — | bookTicker | Active (cross-exchange sell) |
-| **Binance Global** | REST | — | bookTicker | Price feed |
-| **OKX** | REST + WS | — | tickers | Price feed only |
-| **Bybit** | REST + WS | — | orderbook.1 | Price feed only |
-
-## Configuration
-
-Key parameters in `config/settings.py` and `funding_arb/main_loop.py`:
-
-```yaml
-# Funding Rate Arb (post live-trade tuning)
-leverage:           2x (isolated margin)
-stop_loss:          -15% on exchange
-min_funding_rate:   0.25% per 8h to enter (accounts for decay + fees)
-exit_funding_rate:  0.12% per 8h to exit
-stay_threshold:     0.18% (only stay for 3rd payment if above this)
-max_hold:           32 hours
-basis_stop_loss:    1.5% divergence
-hedge_enforcement:  98%+ or reject trade
-entry_mode:         immediate (no window waiting)
-rate_consistency:   2+ scans above threshold required
-approval:           human (5min timeout)
-
-# Cross-Exchange Arb
-max_position:       $10
-daily_loss_limit:   $5
-min_net_spread:     1.0%
-anomaly_filter:     >5% rejected
+```
+funding_arb/      Funding-rate bot: scanner, executor, position manager, state machine,
+                  KuCoin futures client, state file and CLI
+cross_exchange/   Cross-exchange arbitrage: merged order book, spread scanner, executor,
+                  risk manager (kill switch), pair discovery and selection, balance tracking
+core/             Triangular arbitrage: triangle discovery on a pair graph, vectorized
+                  scanner, NumPy profit math
+execution/        Order execution and risk checks for triangular trades
+exchange/         Adapters for KuCoin, Binance, Binance Thailand, OKX and Bybit,
+                  plus a paper-trading and a multi-exchange simulator
+stable_arb/       Stablecoin depeg monitor
+dex_arb/          DEX–CEX scanner with token-safety checks
+rebalancing/      Moving funds between exchanges (threshold-based and opportunity-aware)
+backtest/         Price recorder and replayer
+dashboard/        Rich terminal dashboard
+monitoring/       Pipeline timing metrics
+data/             SQLite logging and price cache
+tools/            Readiness check, profitability scans, Monte Carlo simulator
+config/           Dataclass-based settings
+tests/            170 pytest tests
+docs/             README figures
 ```
 
-## Tests
+## Design notes
 
-```bash
-python -m pytest tests/ -v
-# 170 tests passing
-```
+Three longer documents cover the designs in detail, with Mermaid diagrams:
+
+- [architecture.md](architecture.md): triangular arbitrage
+- [architecture-cross-exchange.md](architecture-cross-exchange.md): cross-exchange arbitrage
+- [architecture-dex-stable.md](architecture-dex-stable.md): the DEX–CEX scanner and the stablecoin depeg monitor
+
+Each design went through a simulated review before it was built: AI personas with different specialties (quant, exchange, risk, security and others) critiqued it. The reviewer names in these documents belong to those personas, not to real people.
 
 ## Disclaimer
 
-This software is for educational and research purposes. Cryptocurrency trading involves significant risk, including the risk of total loss. Use at your own risk. Never trade with money you cannot afford to lose.
+For education and research only; not financial advice. Crypto trading carries a high risk of loss, including total loss. Use this code at your own risk, and never trade money you can't afford to lose.
 
 ## License
 
-MIT
+[MIT](LICENSE)

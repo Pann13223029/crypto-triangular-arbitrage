@@ -23,6 +23,11 @@ env/
 *.db
 *.sqlite3
 
+# Funding bot runtime files (written while the bot runs)
+data/funding_state.json
+data/funding_ledger.jsonl
+data/funding_watchlist.json
+
 # Logs
 logs/
 *.log
