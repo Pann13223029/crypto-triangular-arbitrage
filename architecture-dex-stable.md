@@ -1,6 +1,6 @@
 # DEX-CEX Arbitrage & Stablecoin Depeg Monitor — Architecture Document
 
-> Consensus from 5-expert panel review (discuss → brainstorm → debate → discuss).
+> Drafted with a simulated design review by 5 AI personas (discuss → brainstorm → debate → discuss). The names below are personas, not real people.
 > Lisa Park (DeFi/DEX), Marcus Chen (CEX), Dr. Wei Chen (Quant), Prof. Krishnamurthy (Risk), JT Thornton (Practitioner).
 
 > **Status: ARCHITECTURE APPROVED.** Phase 1 (monitoring + alerts) in development.
@@ -411,4 +411,4 @@ keyring>=25.0.0       # OS keychain for private keys
 
 ---
 
-*Document generated from 5-expert panel consensus — Lisa Park, Marcus Chen, Dr. Wei Chen, Prof. Krishnamurthy, JT Thornton*
+*Document generated from the consensus of a simulated panel of 5 AI personas, not real people — Lisa Park, Marcus Chen, Dr. Wei Chen, Prof. Krishnamurthy, JT Thornton*

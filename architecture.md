@@ -1,6 +1,6 @@
 # Crypto Triangular Arbitrage — Architecture Document
 
-> Consensus output from a 10-expert panel review (discuss → brainstorm → debate → discuss).
+> Drafted with a simulated design review by 10 AI personas with different specialties (discuss → brainstorm → debate → discuss). The reviewer names at the end are personas, not real people.
 
 > **Status:** Triangular arb is fully implemented and tested but market is too efficient for retail on Binance (best triangle -0.2% vs 0.225% break-even). The system evolved through cross-exchange arb (inventory risk problem) to **funding rate arbitrage** — the active delta-neutral strategy. See [architecture-cross-exchange.md](architecture-cross-exchange.md) for cross-exchange design.
 
@@ -876,4 +876,4 @@ flowchart LR
 
 ---
 
-*Document generated from expert panel consensus — Dr. Wei Chen (Quant), Sarah Kovacs (Exchange), Raj Patel (Architect), Elena Rossi (Risk), Marcus Thompson (Python), Dr. Yuki Tanaka (Microstructure), Nina Okafor (DevOps), James Liu (Data), Anika Sharma (Security), Carlos Mendez (Compliance)*
+*Document generated from the consensus of a simulated panel of AI personas, not real people — Dr. Wei Chen (Quant), Sarah Kovacs (Exchange), Raj Patel (Architect), Elena Rossi (Risk), Marcus Thompson (Python), Dr. Yuki Tanaka (Microstructure), Nina Okafor (DevOps), James Liu (Data), Anika Sharma (Security), Carlos Mendez (Compliance)*

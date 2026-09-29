@@ -1,6 +1,6 @@
 # Cross-Exchange Arbitrage — Architecture Document
 
-> Consensus from expert panel reviews (9-expert design panel + 8-expert pre-launch review).
+> Drafted with simulated reviews by AI personas (a 9-persona design review and an 8-persona pre-launch review). The reviewer names at the end are personas, not real people.
 
 > **Status: BUILT, DEPRIORITIZED.** System verified with real market data but discovered fundamental inventory risk: tokens drop 10-42% while holding, wiping arb profit. Spreads also rotate daily (BARD→SAHARA→gone). Strategy pivoted to **funding rate arbitrage** (delta-neutral, no inventory risk). Cross-exchange infrastructure remains functional for future use.
 
@@ -773,4 +773,4 @@ flowchart TB
 
 ---
 
-*Document generated from expert panel consensus — Dr. Elena Vasquez, Marcus Chen, Aisha Patel, Tomasz Kowalski, Dr. Yuki Tanaka, James Okafor, Sofia Reyes, Dr. Raj Mehta, Lena Hoffmann*
+*Document generated from the consensus of a simulated panel of AI personas, not real people — Dr. Elena Vasquez, Marcus Chen, Aisha Patel, Tomasz Kowalski, Dr. Yuki Tanaka, James Okafor, Sofia Reyes, Dr. Raj Mehta, Lena Hoffmann*
